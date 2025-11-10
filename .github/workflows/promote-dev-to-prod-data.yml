@@ -3,7 +3,7 @@ name: Promote DEV data → PROD (cars)
 on:
   # Se dispara automáticamente cuando finaliza el nightly de DEV
   workflow_run:
-    workflows: ["DEV Nightly load (17:17 Europe/Madrid)"]
+    workflows: ["DEV Nightly load (17:15 Europe/Madrid)"]
     types: [completed]
   # Opcional: poder lanzarlo a mano
   workflow_dispatch: {}
