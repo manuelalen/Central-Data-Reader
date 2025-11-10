@@ -1,4 +1,4 @@
-name: Promote DEV → PROD (metadata-driven, depends on nightly)
+name: Promote DEV → PROD (via Stored Procedure)
 
 on:
   # Depende del nightly
@@ -19,7 +19,6 @@ permissions:
 
 jobs:
   promote:
-    # Solo si el nightly fue OK o si es manual
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: prod
@@ -27,11 +26,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Verify SQL template exists
-        shell: bash
-        run: |
-          test -f scripts/run_ingestion.sql.tmpl || { echo "❌ Falta scripts/run_ingestion.sql.tmpl"; exit 1; }
 
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-cli-action@v2.0
@@ -44,7 +38,7 @@ jobs:
           SF_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SF_USER:      ${{ secrets.SNOWFLAKE_USER }}
           SF_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
-          SF_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}        # debe tener SELECT en DEV y WRITE en PROD
           SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           set -euo pipefail
@@ -65,21 +59,14 @@ jobs:
           snow --version
           snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
 
-      - name: Prepare SQL from template
+      - name: Run ingestion procedure
         shell: bash
         run: |
           set -euo pipefail
           ING="${{ github.event.inputs.ingestion_name }}"
           if [ -z "${ING:-}" ]; then ING="1.INGESTION-TO-PROD"; fi
-          sed "s/__ING__/${ING//\//\\/}/g" scripts/run_ingestion.sql.tmpl > run_ingestion.sql
-          echo "== run_ingestion.sql (first 20) ==" && head -n 20 run_ingestion.sql || true
-          echo "== run_ingestion.sql (last 20) ==" && tail -n 20 run_ingestion.sql || true
-
-      - name: Execute metadata-driven promotion
-        shell: bash
-        run: |
-          set -euo pipefail
-          snow sql --filename run_ingestion.sql
+          echo "🚀 CALL SP_RUN_INGESTION_JS('$ING')"
+          snow sql -q "CALL DEV_BRONCE_CARS_PROPERTIES.CP_STG.SP_RUN_INGESTION_JS('$ING');"
 
       - name: Done
         run: echo "✅ Promotion DEV → PROD completada."
