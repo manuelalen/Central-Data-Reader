@@ -1,18 +1,15 @@
--- Metadata-driven DEV -> PROD in one statement
+-- Metadata-driven DEV -> PROD in one statement (truncate+insert)
+-- Requisitos: mismo esquema/orden de columnas entre SOURCE y TARGET.
+-- Dedup opcional si hay MERGE_KEYS + DEDUPE_ORDER en metadata.
+
 EXECUTE IMMEDIATE $$
 DECLARE
   IN_INGESTION_NAME STRING DEFAULT '__ING__';
 
-  v_cols_tgt   STRING;
   v_partition  STRING;
   v_orderby    STRING;
   v_select_src STRING;
-  v_on         STRING;
-  v_set        STRING;
-  v_cols_list  STRING;
   v_sql        STRING;
-  v_sql_trunc  STRING;
-  v_sql_ins    STRING;
 BEGIN
   FOR rec IN (
     SELECT
@@ -31,25 +28,7 @@ BEGIN
     ORDER BY ID
   ) DO
 
-    -- 1) columnas comunes target ∩ source (usamos target como canon del orden)
-    SELECT LISTAGG('"'||c.COLUMN_NAME||'"', ',') WITHIN GROUP (ORDER BY c.ORDINAL_POSITION)
-      INTO :v_cols_tgt
-    FROM IDENTIFIER(rec.T_DB||'.INFORMATION_SCHEMA.COLUMNS') c
-    WHERE c.TABLE_SCHEMA = rec.T_SC
-      AND c.TABLE_NAME   = rec.T_TB
-      AND EXISTS (
-        SELECT 1
-        FROM IDENTIFIER(rec.S_DB||'.INFORMATION_SCHEMA.COLUMNS') s
-        WHERE s.TABLE_SCHEMA = rec.S_SC
-          AND s.TABLE_NAME   = rec.S_TB
-          AND s.COLUMN_NAME  = c.COLUMN_NAME
-      );
-
-    IF v_cols_tgt IS NULL THEN
-      v_cols_tgt := '*';
-    END IF;
-
-    -- 2) SELECT origen con dedupe opcional
+    -- 1) SELECT origen con dedupe opcional (si hay MERGE_KEYS)
     v_partition := NULL;
     IF rec.MERGE_KEYS IS NOT NULL AND ARRAY_SIZE(rec.MERGE_KEYS) > 0 THEN
       SELECT LISTAGG('"'||value::STRING||'"', ',')
@@ -67,54 +46,18 @@ BEGIN
     END IF;
 
     IF v_partition IS NOT NULL THEN
-      v_select_src := 'SELECT '||v_cols_tgt||'
-                       FROM (
-                         SELECT *
-                         FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"
-                         QUALIFY ROW_NUMBER() OVER (
-                           PARTITION BY '||v_partition||'
-                           ORDER BY '||v_orderby||'
-                         ) = 1
-                       )';
+      v_select_src := 'SELECT * FROM ( SELECT * FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"
+                       QUALIFY ROW_NUMBER() OVER (PARTITION BY '||v_partition||' ORDER BY '||v_orderby||') = 1 )';
     ELSE
-      v_select_src := 'SELECT '||v_cols_tgt||'
-                       FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"';
+      v_select_src := 'SELECT * FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"';
     END IF;
 
-    -- 3) MERGE si hay claves; si no, TRUNCATE+INSERT
-    IF rec.MERGE_KEYS IS NOT NULL AND ARRAY_SIZE(rec.MERGE_KEYS) > 0 THEN
-      SELECT LISTAGG('NVL(T."'||value::STRING||'", '''') = NVL(S."'||value::STRING||'", '''')', ' AND ')
-        INTO :v_on
-      FROM TABLE(FLATTEN(input => rec.MERGE_KEYS));
+    -- 2) Reemplazo de datos en TARGET: TRUNCATE + INSERT SELECT *
+    v_sql := 'TRUNCATE TABLE "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'";';
+    EXECUTE IMMEDIATE v_sql;
 
-      SELECT LISTAGG('T."'||c.COLUMN_NAME||'" = S."'||c.COLUMN_NAME||'"', ', ')
-        INTO :v_set
-      FROM IDENTIFIER(rec.T_DB||'.INFORMATION_SCHEMA.COLUMNS') c
-      WHERE c.TABLE_SCHEMA = rec.T_SC AND c.TABLE_NAME = rec.T_TB
-        AND POSITION('"'||c.COLUMN_NAME||'"', v_cols_tgt) > 0;
-
-      v_cols_list := v_cols_tgt;
-
-      v_sql := '
-        MERGE INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" AS T
-        USING ('||v_select_src||') AS S
-        ON '||v_on||'
-        WHEN MATCHED THEN UPDATE SET '||v_set||'
-        WHEN NOT MATCHED THEN INSERT ('||v_cols_list||')
-        VALUES ('||REPLACE(v_cols_list, '"', 'S."')||');
-      ';
-      EXECUTE IMMEDIATE v_sql;
-
-    ELSE
-      v_sql_trunc := 'TRUNCATE TABLE "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'";';
-      EXECUTE IMMEDIATE v_sql_trunc;
-
-      v_sql_ins := '
-        INSERT INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" ('||v_cols_tgt||')
-        '||v_select_src||';
-      ';
-      EXECUTE IMMEDIATE v_sql_ins;
-    END IF;
+    v_sql := 'INSERT INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" '||v_select_src||';';
+    EXECUTE IMMEDIATE v_sql;
 
   END FOR;
 END;
