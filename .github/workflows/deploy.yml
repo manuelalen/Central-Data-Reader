@@ -1,4 +1,4 @@
-name: Deploy to Snowflake
+name: Deploy DDLs to Snowflake
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
         with:
           python-cache-dependency-glob: ""
 
-      # === Mapeo de roles y warehouses por entorno ===
+      # Mapear role/warehouse según entorno
       - name: Map role & warehouse by environment
         id: map
         shell: bash
@@ -40,7 +40,7 @@ jobs:
             echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      # === Configuración de la conexión Snowflake ===
+      # Crear conexión 'default' con contraseña desde secrets (evita prompt)
       - name: Configure Snowflake connection
         id: conn
         shell: bash
@@ -50,19 +50,18 @@ jobs:
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
           echo "Creando conexión Snowflake por defecto..."
-          # Usa la variable de entorno SNOWFLAKE_PASSWORD para evitar el warning
           snow connection add \
             --connection-name default \
             --account "$SNOWFLAKE_ACCOUNT" \
             --username "$SNOWFLAKE_USER" \
+            --password "$SNOWFLAKE_PASSWORD" \
             --authenticator snowflake \
             --rolename "${{ steps.map.outputs.ROLE }}" \
             --warehouse "${{ steps.map.outputs.WH }}"
           echo "✅ Conexión creada."
-          echo "🔍 Probando conexión..."
           snow connection test --connection-name default
 
-      # === Detección de versiones pendientes ===
+      # Detectar versiones pendientes
       - name: Detect pending versions
         id: pending
         shell: bash
@@ -77,7 +76,6 @@ jobs:
             exit 0
           fi
 
-          # Consultar versiones ya ejecutadas
           snow sql -c default -q "
             USE DATABASE CICD_CONTROL;
             USE SCHEMA CICD_CONTROL.DEPLOYMENTS;
@@ -104,7 +102,7 @@ jobs:
             echo "none=false" >> $GITHUB_OUTPUT
           fi
 
-      # === Ejecución de scripts nuevos ===
+      # Ejecutar solo las versiones pendientes y registrar en el log
       - name: Deploy pending SQLs
         if: steps.pending.outputs.none == 'false'
         shell: bash
@@ -113,11 +111,8 @@ jobs:
           while read -r file; do
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
-
-            # Ejecutar el SQL
             snow sql -c default -q "!source $file;"
 
-            # Registrar éxito
             snow sql -c default -q "
               USE DATABASE CICD_CONTROL;
               USE SCHEMA CICD_CONTROL.DEPLOYMENTS;
