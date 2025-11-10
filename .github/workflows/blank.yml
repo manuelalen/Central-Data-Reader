@@ -1,0 +1,26 @@
+name: Promotion to SIT
+on:
+  workflow_dispatch: {}          # correr manualmente
+  push:
+    branches: [ "dev" ]          # (opcional) autocrea PR al hacer push a dev
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Create PR dev → sit
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "Promote dev → sit"
+          body: "Promoción automática de cambios de dev hacia sit."
+          base: "sit"
+          branch: "dev"
+          draft: false
