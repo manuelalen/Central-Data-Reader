@@ -1,4 +1,4 @@
-name: Deploy DDLs to Snowflake
+name: Deploy DDLs to Snowflake (SnowSQL)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   deploy:
@@ -22,12 +21,11 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Snowflake CLI
-        uses: snowflakedb/snowflake-cli-action@v2.0
-        with:
-          python-cache-dependency-glob: ""
+      # Instala SnowSQL (cliente clásico, estable)
+      - name: Install SnowSQL
+        uses: snow-actions/setup-snowsql@v1
 
-      # Mapear ROLE/WH por entorno
+      # Mapea ROLE y WAREHOUSE según el entorno elegido en el botón
       - name: Map role & warehouse by environment
         id: map
         shell: bash
@@ -40,14 +38,14 @@ jobs:
             echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      # Detectar versiones pendientes (sin conexiones guardadas; sin prompts)
+      # Detecta versiones pendientes leyendo la tabla de log con snowsql
       - name: Detect pending versions
         id: pending
         shell: bash
         env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USERNAME: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SF_ACCOUNT:  ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER:     ${{ secrets.SNOWFLAKE_USER }}
+          SF_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -58,21 +56,23 @@ jobs:
             exit 0
           fi
 
+          # Orden natural por versión
           printf "%s\n" "${files[@]}" | sort -V > all_files.txt
 
-          # IMPORTANTE: flags globales ANTES de 'sql'
-          snow \
-            --account "$SNOWFLAKE_ACCOUNT" \
-            --username "$SNOWFLAKE_USERNAME" \
-            --password "$SNOWFLAKE_PASSWORD" \
-            --role "${{ steps.map.outputs.ROLE }}" \
-            --warehouse "${{ steps.map.outputs.WH }}" \
-            sql \
-            --database "CICD_CONTROL" \
-            --schema "DEPLOYMENTS" \
-            --query "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
-            --format csv \
-          | tail -n +2 > executed.txt
+          # Consulta versiones ya ejecutadas para el entorno
+          snowsql \
+            -a "$SF_ACCOUNT" \
+            -u "$SF_USER" \
+            -p "$SF_PASSWORD" \
+            -r "${{ steps.map.outputs.ROLE }}" \
+            -w "${{ steps.map.outputs.WH }}" \
+            -d CICD_CONTROL \
+            -s DEPLOYMENTS \
+            -q "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
+            -o output_format=csv \
+            -o header=false \
+            -o timing=false \
+            > executed.txt || true
 
           pending=()
           while read -r f; do
@@ -92,44 +92,45 @@ jobs:
             echo "none=false" >> $GITHUB_OUTPUT
           fi
 
-      # Ejecutar SOLO las pendientes y registrar en el log
+      # Ejecuta sólo las pendientes y registra en el log
       - name: Deploy pending SQLs
         if: steps.pending.outputs.none == 'false'
         shell: bash
         env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USERNAME: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SF_ACCOUNT:  ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER:     ${{ secrets.SNOWFLAKE_USER }}
+          SF_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
           set -euo pipefail
+
           while read -r file; do
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
 
-            # Ejecuta el fichero SQL directamente (sin conexiones previas)
-            snow \
-              --account "$SNOWFLAKE_ACCOUNT" \
-              --username "$SNOWFLAKE_USERNAME" \
-              --password "$SNOWFLAKE_PASSWORD" \
-              --role "${{ steps.map.outputs.ROLE }}" \
-              --warehouse "${{ steps.map.outputs.WH }}" \
-              sql \
-              --file "$file"
+            # Ejecuta el fichero SQL (si quieres fallo duro: -o exit_on_error=true)
+            snowsql \
+              -a "$SF_ACCOUNT" \
+              -u "$SF_USER" \
+              -p "$SF_PASSWORD" \
+              -r "${{ steps.map.outputs.ROLE }}" \
+              -w "${{ steps.map.outputs.WH }}" \
+              -f "$file" \
+              -o exit_on_error=true \
+              -o timing=false
 
-            # Registrar éxito en el log
-            snow \
-              --account "$SNOWFLAKE_ACCOUNT" \
-              --username "$SNOWFLAKE_USERNAME" \
-              --password "$SNOWFLAKE_PASSWORD" \
-              --role "${{ steps.map.outputs.ROLE }}" \
-              --warehouse "${{ steps.map.outputs.WH }}" \
-              sql \
-              --database "CICD_CONTROL" \
-              --schema "DEPLOYMENTS" \
-              --query "INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
-                       VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');" \
-              --format csv
+            # Registrar éxito
+            snowsql \
+              -a "$SF_ACCOUNT" \
+              -u "$SF_USER" \
+              -p "$SF_PASSWORD" \
+              -r "${{ steps.map.outputs.ROLE }}" \
+              -w "${{ steps.map.outputs.WH }}" \
+              -d CICD_CONTROL \
+              -s DEPLOYMENTS \
+              -q "INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
+                  VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');" \
+              -o timing=false
           done < pending.txt
 
       - name: Done
-        run: echo "✅ Despliegue completado sin prompts ni conexiones por defecto."
+        run: echo "✅ Despliegue completado sin prompts ni sorpresas (SnowSQL)."
