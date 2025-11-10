@@ -60,7 +60,6 @@ jobs:
           client_session_keep_alive = true
           EOF
           chmod 600 ~/.snowflake/config.toml
-          # (opcional) silenciar warning si el runner cambia permisos por defecto
           export SF_SKIP_WARNING_FOR_READ_PERMISSIONS_ON_CONFIG_FILE=true
           snow --version
           snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
@@ -112,7 +111,9 @@ jobs:
           while read -r file; do
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
-            snow sql --file "$file"
+
+            # Ejecuta el fichero SQL con --filename (compat v3.x)
+            snow sql --filename "$file"
 
             snow sql \
               --database "CICD_CONTROL" \
@@ -123,4 +124,4 @@ jobs:
           done < pending.txt
 
       - name: Done
-        run: echo "✅ Despliegue completado sin prompts ni errores de permisos."
+        run: echo "✅ Despliegue completado."
