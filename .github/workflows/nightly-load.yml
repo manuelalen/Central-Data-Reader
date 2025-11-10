@@ -1,9 +1,10 @@
-name: DEV Nightly load (17:17 Europe/Madrid)
+name: DEV Nightly load (17:15 Europe/Madrid)
 
 on:
+  # Ejecuta cada 5 minutos y filtramos por hora local para evitar líos con cambios de hora
   schedule:
-    # 17:15 Europe/Madrid ≈ 16:15 UTC
-    - cron: '15 17 * * *'
+    - cron: "*/5 * * * *"
+  # Permite ejecutarlo manualmente
   workflow_dispatch: {}
 
 permissions:
@@ -22,6 +23,17 @@ jobs:
         uses: snowflakedb/snowflake-cli-action@v2.0
         with:
           python-cache-dependency-glob: ""
+
+      - name: Gate by Europe/Madrid 17:15
+        shell: bash
+        run: |
+          NOW=$(TZ=Europe/Madrid date +%H:%M)
+          echo "Europe/Madrid time is $NOW"
+          if [ "$NOW" != "17:15" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Not 17:15 Europe/Madrid — skipping run."
+            exit 0
+          fi
+          echo "It's 17:15 Europe/Madrid (or manual dispatch) — continue."
 
       - name: Configure Snow CLI profile (default → DEV)
         shell: bash
@@ -50,11 +62,35 @@ jobs:
           snow --version
           snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
 
-      - name: Create/replace DEV staging table
+      # Snapshot previo (zero-copy CLONE) solo si existe la tabla origen
+      - name: Snapshot (clone) current staging if exists
         shell: bash
         run: |
+          set -euo pipefail
+          EXISTS=$(snow sql --query "
+            SELECT COUNT(*) 
+            FROM DEV_BRONCE_CARS_PROPERTIES.INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = 'CP_STG' AND TABLE_NAME = 'D_CARS';
+          " --format csv | tail -n1)
+          if [ "$EXISTS" -gt 0 ]; then
+            TS=$(date -u +%Y%m%d%H%M%S)
+            snow sql --query "CREATE SCHEMA IF NOT EXISTS DEV_BRONCE_CARS_PROPERTIES.CP_BKP;"
+            snow sql --query "
+              CREATE OR REPLACE TABLE DEV_BRONCE_CARS_PROPERTIES.CP_BKP.D_CARS_${TS}
+              CLONE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS;
+            "
+            echo "Snapshot created: DEV_BRONCE_CARS_PROPERTIES.CP_BKP.D_CARS_${TS}"
+          else
+            echo "Staging table does not exist yet; skipping snapshot."
+          fi
+
+      # Crear SI NO EXISTE y evolucionar columnas (nunca OR REPLACE)
+      - name: Ensure DEV staging exists & evolve schema (safe)
+        shell: bash
+        run: |
+          set -euo pipefail
           snow sql --query "
-            CREATE OR REPLACE TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS (
+            CREATE TABLE IF NOT EXISTS DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS (
               MATRICULA VARCHAR(50),
               DNI_PROPIETARIO VARCHAR(50),
               MARCA_VEHICULO VARCHAR(99),
@@ -65,7 +101,16 @@ jobs:
               T_REC_UPD_TST TIMESTAMP_NTZ(9)
             );
           "
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS MATRICULA VARCHAR(50);"
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS DNI_PROPIETARIO VARCHAR(50);"
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS MARCA_VEHICULO VARCHAR(99);"
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS PROVINCIA VARCHAR(50);"
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS MUNICIPIO VARCHAR(50);"
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS FECHA_PROPIETARIO VARCHAR(50);"
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS T_REC_INS_TST TIMESTAMP_NTZ(9);"
+          snow sql --query "ALTER TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS ADD COLUMN IF NOT EXISTS T_REC_UPD_TST TIMESTAMP_NTZ(9);"
 
+      # Ejecutar limpieza si existe el fichero
       - name: Run scripts/cleanup_data.sql (optional)
         shell: bash
         run: |
@@ -76,6 +121,19 @@ jobs:
             echo "⚠️ scripts/cleanup_data.sql no existe; se omite."
           fi
 
+      # Guardrail: no continuar si la staging está vacía (evita propagar vacío)
+      - name: Guardrail – ensure staging not empty
+        id: guard
+        shell: bash
+        run: |
+          COUNT=$(snow sql --query "SELECT COUNT(*) FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS;" --format csv | tail -n1)
+          echo "Rowcount in staging: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ Staging está vacía; abortando para no propagar vacío."
+            exit 1
+          fi
+
+      # Asegura tabla destino DEV Alhaurín y Málaga (idempotente)
       - name: Ensure DEV destination tables exist (idempotent)
         shell: bash
         run: |
@@ -102,10 +160,11 @@ jobs:
             );
           "
 
-      - name: Route rows by MUNICIPIO (all in DEV)
+      # Ruteo por MUNICIPIO dentro de DEV
+      - name: Route rows by MUNICIPIO (all within DEV)
         shell: bash
         run: |
-          # ALAHURIN/ALHAURIN EL GRANDE → DEV Alahurín
+          # A( L )HAURIN EL GRANDE → DEV Alhaurín
           snow sql --query "
             INSERT INTO DEV_BRONCE_ALAHURIN_GRANDE_VEHICULOS.AGV_STG.D_CARS
               (MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST)
@@ -113,8 +172,7 @@ jobs:
             FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS
             WHERE UPPER(TRIM(MUNICIPIO)) IN ('ALAHURIN EL GRANDE','ALHAURIN EL GRANDE');
           "
-
-          # MALAGA/MÁLAGA → DEV Málaga
+          # MALAGA / MÁLAGA → DEV Málaga
           snow sql --query "
             INSERT INTO DEV_BRONCE_MALAGA_VEHICULOS.MV_STG.D_CARS
               (MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST)
@@ -122,3 +180,6 @@ jobs:
             FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS
             WHERE UPPER(TRIM(MUNICIPIO)) IN ('MALAGA','MÁLAGA');
           "
+
+      - name: Done
+        run: echo "✅ DEV nightly finished (safe, snapshot, cleanup, routed)."
