@@ -19,14 +19,15 @@ jobs:
     environment: ${{ github.event.inputs.environment }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-cli-action@v2.0
         with:
-          python-cache-dependency-glob: ''
+          python-cache-dependency-glob: ""
 
+      # === Mapeo de roles y warehouses por entorno ===
       - name: Map role & warehouse by environment
         id: map
         shell: bash
@@ -39,7 +40,7 @@ jobs:
             echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      # === configurar la conexión 'default' ===
+      # === Configuración de la conexión Snowflake ===
       - name: Configure Snowflake connection
         id: conn
         shell: bash
@@ -49,29 +50,34 @@ jobs:
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
           echo "Creando conexión Snowflake por defecto..."
-          snow connection add default \
+          # Usa la variable de entorno SNOWFLAKE_PASSWORD para evitar el warning
+          snow connection add \
+            --connection-name default \
             --account "$SNOWFLAKE_ACCOUNT" \
             --username "$SNOWFLAKE_USER" \
             --authenticator snowflake \
-            --password "$SNOWFLAKE_PASSWORD" \
             --rolename "${{ steps.map.outputs.ROLE }}" \
             --warehouse "${{ steps.map.outputs.WH }}"
           echo "✅ Conexión creada."
+          echo "🔍 Probando conexión..."
+          snow connection test --connection-name default
 
-      - name: List pending versions
+      # === Detección de versiones pendientes ===
+      - name: Detect pending versions
         id: pending
         shell: bash
         run: |
           set -e
+          mkdir -p sql
           ls -1 sql/R_ddls_*.sql | sort -V > all_files.txt || true
 
           if [ ! -s all_files.txt ]; then
-            echo "No hay ficheros en /sql con patrón R_ddls_*.sql"
+            echo "⚠️ No hay ficheros en /sql con patrón R_ddls_*.sql"
             echo "none=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # versiones ya ejecutadas
+          # Consultar versiones ya ejecutadas
           snow sql -c default -q "
             USE DATABASE CICD_CONTROL;
             USE SCHEMA CICD_CONTROL.DEPLOYMENTS;
@@ -93,11 +99,12 @@ jobs:
             echo "none=true" >> $GITHUB_OUTPUT
           else
             printf "%s\n" "${pending[@]}" > pending.txt
-            echo "Se desplegarán estos ficheros:"
+            echo "Se desplegarán los siguientes scripts:"
             cat pending.txt
             echo "none=false" >> $GITHUB_OUTPUT
           fi
 
+      # === Ejecución de scripts nuevos ===
       - name: Deploy pending SQLs
         if: steps.pending.outputs.none == 'false'
         shell: bash
@@ -107,8 +114,10 @@ jobs:
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
 
+            # Ejecutar el SQL
             snow sql -c default -q "!source $file;"
 
+            # Registrar éxito
             snow sql -c default -q "
               USE DATABASE CICD_CONTROL;
               USE SCHEMA CICD_CONTROL.DEPLOYMENTS;
@@ -118,4 +127,4 @@ jobs:
           done < pending.txt
 
       - name: Done
-        run: echo "✅ Deploy completado con éxito."
+        run: echo "✅ Despliegue completado con éxito."
