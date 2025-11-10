@@ -1,4 +1,5 @@
--- Anonymous SQL Scripting block: metadata-driven DEV -> PROD
+-- Metadata-driven DEV -> PROD in one statement
+EXECUTE IMMEDIATE $$
 DECLARE
   IN_INGESTION_NAME STRING DEFAULT '__ING__';
 
@@ -117,3 +118,4 @@ BEGIN
 
   END FOR;
 END;
+$$;
