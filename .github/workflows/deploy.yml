@@ -27,7 +27,7 @@ jobs:
         with:
           python-cache-dependency-glob: ""
 
-      # Mapa de ROLE/WH por entorno
+      # Mapa ROLE/WH por entorno
       - name: Map role & warehouse by environment
         id: map
         shell: bash
@@ -40,7 +40,7 @@ jobs:
             echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      # Detectar versiones pendientes (sin conexión persistente; todo por flags)
+      # Detectar versiones pendientes (SIN conexiones guardadas; SIN prompts)
       - name: Detect pending versions
         id: pending
         shell: bash
@@ -49,26 +49,30 @@ jobs:
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
-          set -e
-          ls -1 sql/R_ddls_*.sql | sort -V > all_files.txt || true
-
-          if [ ! -s all_files.txt ]; then
+          set -euo pipefail
+          shopt -s nullglob
+          files=(sql/R_ddls_*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
             echo "⚠️ No hay ficheros en /sql con patrón R_ddls_*.sql"
             echo "none=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Consultar versiones ya ejecutadas para el entorno elegido
+          # Orden natural por versión
+          printf "%s\n" "${files[@]}" | sort -V > all_files.txt
+
+          # Obtener versiones ya ejecutadas para el entorno
           snow sql \
-            -a "$SNOWFLAKE_ACCOUNT" \
-            -u "$SNOWFLAKE_USER" \
-            -p "$SNOWFLAKE_PASSWORD" \
-            -r "${{ steps.map.outputs.ROLE }}" \
-            -w "${{ steps.map.outputs.WH }}" \
-            -d "CICD_CONTROL" \
-            -s "DEPLOYMENTS" \
-            -q "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
-            --output-format csv | tail -n +2 > executed.txt
+            --account "$SNOWFLAKE_ACCOUNT" \
+            --username "$SNOWFLAKE_USER" \
+            --password "$SNOWFLAKE_PASSWORD" \
+            --role "${{ steps.map.outputs.ROLE }}" \
+            --warehouse "${{ steps.map.outputs.WH }}" \
+            --database "CICD_CONTROL" \
+            --schema "DEPLOYMENTS" \
+            --query "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
+            --output-format csv \
+            | tail -n +2 > executed.txt
 
           pending=()
           while read -r f; do
@@ -83,12 +87,12 @@ jobs:
             echo "none=true" >> $GITHUB_OUTPUT
           else
             printf "%s\n" "${pending[@]}" > pending.txt
-            echo "Se desplegarán los siguientes scripts:"
+            echo "Se desplegarán:"
             cat pending.txt
             echo "none=false" >> $GITHUB_OUTPUT
           fi
 
-      # Ejecutar SOLO las pendientes y registrar el log (todo por flags; sin prompts)
+      # Ejecutar SOLO las pendientes y registrar en el log
       - name: Deploy pending SQLs
         if: steps.pending.outputs.none == 'false'
         shell: bash
@@ -97,32 +101,32 @@ jobs:
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
-          set -e
+          set -euo pipefail
           while read -r file; do
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
 
-            # Ejecuta el SQL (sin DB específica; usa la que determinen tus scripts)
+            # Ejecuta el fichero SQL directamente (sin !source, sin prompts)
             snow sql \
-              -a "$SNOWFLAKE_ACCOUNT" \
-              -u "$SNOWFLAKE_USER" \
-              -p "$SNOWFLAKE_PASSWORD" \
-              -r "${{ steps.map.outputs.ROLE }}" \
-              -w "${{ steps.map.outputs.WH }}" \
-              -q "!source $file;"
+              --account "$SNOWFLAKE_ACCOUNT" \
+              --username "$SNOWFLAKE_USER" \
+              --password "$SNOWFLAKE_PASSWORD" \
+              --role "${{ steps.map.outputs.ROLE }}" \
+              --warehouse "${{ steps.map.outputs.WH }}" \
+              --file "$file"
 
-            # Inserta el log en la tabla de control
+            # Registrar éxito
             snow sql \
-              -a "$SNOWFLAKE_ACCOUNT" \
-              -u "$SNOWFLAKE_USER" \
-              -p "$SNOWFLAKE_PASSWORD" \
-              -r "${{ steps.map.outputs.ROLE }}" \
-              -w "${{ steps.map.outputs.WH }}" \
-              -d "CICD_CONTROL" \
-              -s "DEPLOYMENTS" \
-              -q "INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
-                  VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');"
+              --account "$SNOWFLAKE_ACCOUNT" \
+              --username "$SNOWFLAKE_USER" \
+              --password "$SNOWFLAKE_PASSWORD" \
+              --role "${{ steps.map.outputs.ROLE }}" \
+              --warehouse "${{ steps.map.outputs.WH }}" \
+              --database "CICD_CONTROL" \
+              --schema "DEPLOYMENTS" \
+              --query "INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
+                       VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');"
           done < pending.txt
 
       - name: Done
-        run: echo "✅ Despliegue completado sin prompts."
+        run: echo "✅ Despliegue completado sin prompts ni flags inválidos."
