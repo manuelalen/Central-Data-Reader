@@ -1,4 +1,4 @@
-name: PR sit → main (prod)
+name: (DEPRECATED) PR sit → main (prod)
 on:
   workflow_dispatch: {}
   push:
