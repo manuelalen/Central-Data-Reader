@@ -1,12 +1,9 @@
 name: Promote DEV → PROD (metadata-driven, depends on nightly)
 
 on:
-  # Depende del nightly
   workflow_run:
     workflows: ["DEV Nightly load (17:15 Europe/Madrid)"]
     types: [completed]
-
-  # Opcional: ejecución manual
   workflow_dispatch:
     inputs:
       ingestion_name:
@@ -19,7 +16,6 @@ permissions:
 
 jobs:
   promote:
-    # Solo si el nightly fue OK o si es manual
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: prod
@@ -72,10 +68,8 @@ jobs:
           ING="${{ github.event.inputs.ingestion_name }}"
           if [ -z "${ING:-}" ]; then ING="1.INGESTION-TO-PROD"; fi
           sed "s/__ING__/${ING//\//\\/}/g" scripts/run_ingestion.sql.tmpl > run_ingestion.sql
-          echo "== run_ingestion.sql (first 30) =="
-          head -n 30 run_ingestion.sql || true
-          echo "== run_ingestion.sql (last 30) =="
-          tail -n 30 run_ingestion.sql || true
+          echo "== run_ingestion.sql (first 20) ==" && head -n 20 run_ingestion.sql || true
+          echo "== run_ingestion.sql (last 20) ==" && tail -n 20 run_ingestion.sql || true
 
       - name: Execute metadata-driven promotion
         shell: bash
