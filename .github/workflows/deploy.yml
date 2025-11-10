@@ -1,4 +1,4 @@
-name: Deploy to Snowflake
+name: Deploy DDLs to Snowflake
 
 on:
   workflow_dispatch:
@@ -7,9 +7,7 @@ on:
         description: "Selecciona el entorno destino"
         required: true
         type: choice
-        options:
-          - sit
-          - prod
+        options: [sit, prod]
 
 permissions:
   contents: read
@@ -18,87 +16,86 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # activa los environment secrets del entorno elegido (sit/prod)
     environment: ${{ github.event.inputs.environment }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-cli-action@v2.0
-        with:
-          use-oidc: true
 
-      - name: Determine prefix based on environment
-        id: envmap
+      - name: Map role & warehouse by environment
+        id: map
         run: |
-          if [[ "${{ github.event.inputs.environment }}" == "sit" ]]; then
-            echo "prefix=SIT_" >> $GITHUB_OUTPUT
-            echo "role=SIT_ROLE" >> $GITHUB_OUTPUT
-            echo "warehouse=SIT_WH" >> $GITHUB_OUTPUT
+          if [ "${{ github.event.inputs.environment }}" = "sit" ]; then
+            echo "ROLE=SIT_ROLE" >> $GITHUB_OUTPUT
+            echo "WH=SIT_WH"     >> $GITHUB_OUTPUT
           else
-            echo "prefix=PROD_" >> $GITHUB_OUTPUT
-            echo "role=PROD_ROLE" >> $GITHUB_OUTPUT
-            echo "warehouse=PROD_WH" >> $GITHUB_OUTPUT
+            echo "ROLE=PROD_ROLE" >> $GITHUB_OUTPUT
+            echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      - name: Find pending SQL scripts
+      - name: List pending versions
         id: pending
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
-          echo "Checking which scripts are pending..."
-          # Guardamos todas las versiones de archivos
-          all_files=$(ls sql/R_ddls_*.sql | sort)
-          echo "Found files:"
-          echo "$all_files"
+          set -e
+          ls -1 sql/R_ddls_*.sql | sort -V > all_files.txt
 
-          # Consultamos en Snowflake cuáles están ya ejecutados
-          executed=$(snow sql -q "
-            SELECT VERSION FROM CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG
-            WHERE ENVIRONMENT = upper('${{ github.event.inputs.environment }}')
-          " --output-format csv | tail -n +2)
+          # Obtener versiones ya ejecutadas para el entorno
+          snow sql -q "
+            SELECT VERSION
+            FROM CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG
+            WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}')
+          " --output-format csv | tail -n +2 > executed.txt
 
-          echo "Already executed:"
-          echo "$executed"
-
-          pending_files=()
-          for f in $all_files; do
-            version=$(basename "$f" .sql | cut -d'_' -f3)
-            if ! grep -q "$version" <<< "$executed"; then
-              pending_files+=("$f")
+          pending=()
+          while read -r f; do
+            ver=$(basename "$f" .sql | cut -d'_' -f3)
+            if ! grep -qx "$ver" executed.txt 2>/dev/null; then
+              pending+=("$f")
             fi
-          done
+          done < all_files.txt
 
-          if [ ${#pending_files[@]} -eq 0 ]; then
-            echo "✅ No new SQL files to deploy."
+          if [ ${#pending[@]} -eq 0 ]; then
             echo "none=true" >> $GITHUB_OUTPUT
+            echo "✅ No hay versiones nuevas para desplegar."
           else
-            printf "%s\n" "${pending_files[@]}" > pending_files.txt
+            printf "%s\n" "${pending[@]}" > pending.txt
             echo "none=false" >> $GITHUB_OUTPUT
+            echo "Se desplegarán:"
+            cat pending.txt
           fi
 
-      - name: Deploy pending SQL scripts
+      - name: Deploy pending SQLs
         if: steps.pending.outputs.none == 'false'
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
-          while read file; do
-            version=$(basename "$file" .sql | cut -d'_' -f3)
-            echo "🚀 Deploying $file to ${{ github.event.inputs.environment }} (version $version)"
+          set -e
+          while read -r file; do
+            ver=$(basename "$file" .sql | cut -d'_' -f3)
+            echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
 
-            # Preprocesar prefijos de entorno si lo necesitas
-            sed -E "s/\bDEV_/$(echo "${{ steps.envmap.outputs.prefix }}")/g" "$file" > tmp.sql
-
-            # Ejecutar el SQL
-            snow sql -q "USE ROLE ${{ steps.envmap.outputs.role }};
-                         USE WAREHOUSE ${{ steps.envmap.outputs.warehouse }};
-                         !source tmp.sql;"
-
-            # Registrar éxito
             snow sql -q "
-              INSERT INTO CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
-              VALUES (upper('${{ github.event.inputs.environment }}'), '$version', 'SUCCESS', '${{ github.actor }}');
+              USE ROLE ${{ steps.map.outputs.ROLE }};
+              USE WAREHOUSE ${{ steps.map.outputs.WH }};
+              !source $file;
             "
-          done < pending_files.txt
 
-      - name: Done
-        run: echo "✅ Deployment complete."
+            snow sql -q "
+              INSERT INTO CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG
+              (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
+              VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');
+            "
+          done < pending.txt
+
+      - name: Fin
+        run: echo "✅ Deploy completado."
