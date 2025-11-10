@@ -1,4 +1,4 @@
-name: Deploy SIT (branch sit)
+name: (DEPRECATED) Deploy SIT (branch sit)
 on:
   push:
     branches: [ "sit" ]
