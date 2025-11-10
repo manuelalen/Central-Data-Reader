@@ -1,4 +1,4 @@
-name: Deploy DEV (branch dev)
+name: (DEPRECATED) Deploy DEV (branch dev)
 on:
   push:
     branches: [ "dev" ]
