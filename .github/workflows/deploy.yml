@@ -16,7 +16,6 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # activa los environment secrets del entorno elegido (sit/prod)
     environment: ${{ github.event.inputs.environment }}
 
     steps:
@@ -25,9 +24,13 @@ jobs:
 
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-cli-action@v2.0
+        with:
+          # evitamos el warning de dependencias Python
+          python-cache-dependency-glob: ''
 
       - name: Map role & warehouse by environment
         id: map
+        shell: bash
         run: |
           if [ "${{ github.event.inputs.environment }}" = "sit" ]; then
             echo "ROLE=SIT_ROLE" >> $GITHUB_OUTPUT
@@ -37,21 +40,49 @@ jobs:
             echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      - name: List pending versions
-        id: pending
+      # === conexión 'default' para el CLI ===
+      - name: Configure Snowflake connection (default)
+        id: conn
+        shell: bash
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
-          set -e
-          ls -1 sql/R_ddls_*.sql | sort -V > all_files.txt
+          snow connection add \
+            --name default \
+            --account "$SNOWFLAKE_ACCOUNT" \
+            --user "$SNOWFLAKE_USER" \
+            --authenticator snowflake \
+            --password-stdin \
+            --role "${{ steps.map.outputs.ROLE }}" \
+            --warehouse "${{ steps.map.outputs.WH }}" << 'EOF'
+          $SNOWFLAKE_PASSWORD
+          EOF
 
-          # Obtener versiones ya ejecutadas para el entorno
+      # === calcular versiones pendientes ===
+      - name: List pending versions
+        id: pending
+        shell: bash
+        run: |
+          set -e
+          ls -1 sql/R_ddls_*.sql | sort -V > all_files.txt || true
+
+          if [ ! -s all_files.txt ]; then
+            echo "No hay ficheros en /sql con patrón R_ddls_*.sql"
+            echo "none=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # versiones ya ejecutadas para el entorno elegido
           snow sql -q "
+            USE ROLE ${{ steps.map.outputs.ROLE }};
+            USE WAREHOUSE ${{ steps.map.outputs.WH }};
+            USE DATABASE CICD_CONTROL;
+            USE SCHEMA CICD_CONTROL.DEPLOYMENTS;
             SELECT VERSION
-            FROM CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG
-            WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}')
+            FROM DEPLOY_LOG
+            WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');
           " --output-format csv | tail -n +2 > executed.txt
 
           pending=()
@@ -63,21 +94,19 @@ jobs:
           done < all_files.txt
 
           if [ ${#pending[@]} -eq 0 ]; then
-            echo "none=true" >> $GITHUB_OUTPUT
             echo "✅ No hay versiones nuevas para desplegar."
+            echo "none=true" >> $GITHUB_OUTPUT
           else
             printf "%s\n" "${pending[@]}" > pending.txt
-            echo "none=false" >> $GITHUB_OUTPUT
-            echo "Se desplegarán:"
+            echo "Se desplegarán estos ficheros:"
             cat pending.txt
+            echo "none=false" >> $GITHUB_OUTPUT
           fi
 
+      # === ejecutar solo las pendientes y registrar el log ===
       - name: Deploy pending SQLs
         if: steps.pending.outputs.none == 'false'
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+        shell: bash
         run: |
           set -e
           while read -r file; do
@@ -90,12 +119,16 @@ jobs:
               !source $file;
             "
 
+            # registrar éxito
             snow sql -q "
-              INSERT INTO CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG
-              (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
+              USE ROLE ${{ steps.map.outputs.ROLE }};
+              USE WAREHOUSE ${{ steps.map.outputs.WH }};
+              USE DATABASE CICD_CONTROL;
+              USE SCHEMA CICD_CONTROL.DEPLOYMENTS;
+              INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
               VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');
             "
           done < pending.txt
 
-      - name: Fin
+      - name: Done
         run: echo "✅ Deploy completado."
