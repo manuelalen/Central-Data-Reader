@@ -21,13 +21,11 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Instala el CLI moderno de Snowflake (incluye 'snow')
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-cli-action@v2.0
         with:
           python-cache-dependency-glob: ""
 
-      # Mapear ROLE/WH por entorno
       - name: Map role & warehouse by environment
         id: map
         shell: bash
@@ -40,7 +38,6 @@ jobs:
             echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      # Crear el profile 'default' de Snow CLI escribiendo ~/.snowflake/config.toml
       - name: Configure Snow CLI profile (default)
         shell: bash
         env:
@@ -49,7 +46,9 @@ jobs:
           SF_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
           set -euo pipefail
+          umask 077
           mkdir -p ~/.snowflake
+          chmod 700 ~/.snowflake
           cat > ~/.snowflake/config.toml <<EOF
           [connections.default]
           account = "${SF_ACCOUNT}"
@@ -60,11 +59,12 @@ jobs:
           authenticator = "snowflake"
           client_session_keep_alive = true
           EOF
-          # Prueba de humo: conexión y versión
+          chmod 600 ~/.snowflake/config.toml
+          # (opcional) silenciar warning si el runner cambia permisos por defecto
+          export SF_SKIP_WARNING_FOR_READ_PERMISSIONS_ON_CONFIG_FILE=true
           snow --version
           snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
 
-      # Detectar versiones pendientes leyendo la tabla de log
       - name: Detect pending versions
         id: pending
         shell: bash
@@ -79,13 +79,12 @@ jobs:
           fi
           printf "%s\n" "${files[@]}" | sort -V > all_files.txt
 
-          # Obtener versiones ya ejecutadas para el entorno elegido (usando profile default)
           snow sql \
             --database "CICD_CONTROL" \
             --schema "DEPLOYMENTS" \
             --query "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
             --format csv \
-            | tail -n +2 > executed.txt || true
+          | tail -n +2 > executed.txt || true
 
           pending=()
           while read -r f; do
@@ -105,7 +104,6 @@ jobs:
             echo "none=false" >> $GITHUB_OUTPUT
           fi
 
-      # Ejecutar SOLO las pendientes y registrar en el log
       - name: Deploy pending SQLs
         if: steps.pending.outputs.none == 'false'
         shell: bash
@@ -114,11 +112,8 @@ jobs:
           while read -r file; do
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
-
-            # Ejecuta el SQL; si quieres que falle duro ante el primer error:
             snow sql --file "$file"
 
-            # Registrar éxito en el log
             snow sql \
               --database "CICD_CONTROL" \
               --schema "DEPLOYMENTS" \
@@ -128,4 +123,4 @@ jobs:
           done < pending.txt
 
       - name: Done
-        run: echo "✅ Despliegue completado sin prompts ni acciones inexistentes."
+        run: echo "✅ Despliegue completado sin prompts ni errores de permisos."
