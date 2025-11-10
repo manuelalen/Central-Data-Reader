@@ -1,4 +1,4 @@
-name: Promotion to SIT
+name: (DEPRECATED) Promotion to SIT
 on:
   workflow_dispatch: {}          # correr manualmente
   push:
