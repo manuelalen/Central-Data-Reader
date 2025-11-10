@@ -1,0 +1,49 @@
+name: Deploy SQL to Snowflake
+on:
+  push:
+    branches: [ "dev", "sit", "main" ]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name }}  # dev / sit / main
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-cli-action@v2.0
+        with:
+          use-oidc: true
+
+      - name: Determine environment prefix
+        id: envmap
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "dev" ]]; then
+            echo "prefix=DEV_" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "sit" ]]; then
+            echo "prefix=SIT_" >> $GITHUB_OUTPUT
+          else
+            echo "prefix=PROD_" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Preprocess SQL files (auto prefix DBs)
+        run: |
+          mkdir -p processed_sql
+          for file in sql/*.sql; do
+            # Sustituye "CREATE DATABASE " o "FROM BRONCE_" etc.
+            sed -E "s/\bBRONCE_/$(echo "${{ steps.envmap.outputs.prefix }}")BRONCE_/g" "$file" > "processed_sql/$(basename $file)"
+          done
+
+      - name: Deploy SQL files to Snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+        run: |
+          for file in processed_sql/*.sql; do
+            echo "🚀 Ejecutando ${file}"
+            snow sql -q "EXECUTE IMMEDIATE FROM '${file}'" || exit 1
+          done
