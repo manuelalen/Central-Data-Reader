@@ -1,7 +1,15 @@
-name: Deploy SQL to Snowflake
+name: Deploy to Snowflake
+
 on:
-  push:
-    branches: [ "dev", "sit", "main" ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Selecciona el entorno destino"
+        required: true
+        type: choice
+        options:
+          - sit
+          - prod
 
 permissions:
   contents: read
@@ -10,7 +18,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name }}  # dev / sit / main
+    environment: ${{ github.event.inputs.environment }}
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,30 +29,76 @@ jobs:
         with:
           use-oidc: true
 
-      - name: Determine environment prefix
+      - name: Determine prefix based on environment
         id: envmap
         run: |
-          if [[ "${GITHUB_REF_NAME}" == "dev" ]]; then
-            echo "prefix=DEV_" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF_NAME}" == "sit" ]]; then
+          if [[ "${{ github.event.inputs.environment }}" == "sit" ]]; then
             echo "prefix=SIT_" >> $GITHUB_OUTPUT
+            echo "role=SIT_ROLE" >> $GITHUB_OUTPUT
+            echo "warehouse=SIT_WH" >> $GITHUB_OUTPUT
           else
             echo "prefix=PROD_" >> $GITHUB_OUTPUT
+            echo "role=PROD_ROLE" >> $GITHUB_OUTPUT
+            echo "warehouse=PROD_WH" >> $GITHUB_OUTPUT
           fi
 
-      - name: Preprocess SQL files (auto prefix DBs)
+      - name: Find pending SQL scripts
+        id: pending
         run: |
-          mkdir -p processed_sql
-          for file in sql/*.sql; do
-            # Sustituye "CREATE DATABASE " o "FROM BRONCE_" etc.
-            sed -E "s/\bBRONCE_/$(echo "${{ steps.envmap.outputs.prefix }}")BRONCE_/g" "$file" > "processed_sql/$(basename $file)"
+          echo "Checking which scripts are pending..."
+          # Guardamos todas las versiones de archivos
+          all_files=$(ls sql/R_ddls_*.sql | sort)
+          echo "Found files:"
+          echo "$all_files"
+
+          # Consultamos en Snowflake cuáles están ya ejecutados
+          executed=$(snow sql -q "
+            SELECT VERSION FROM CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG
+            WHERE ENVIRONMENT = upper('${{ github.event.inputs.environment }}')
+          " --output-format csv | tail -n +2)
+
+          echo "Already executed:"
+          echo "$executed"
+
+          pending_files=()
+          for f in $all_files; do
+            version=$(basename "$f" .sql | cut -d'_' -f3)
+            if ! grep -q "$version" <<< "$executed"; then
+              pending_files+=("$f")
+            fi
           done
 
-      - name: Deploy SQL files to Snowflake
+          if [ ${#pending_files[@]} -eq 0 ]; then
+            echo "✅ No new SQL files to deploy."
+            echo "none=true" >> $GITHUB_OUTPUT
+          else
+            printf "%s\n" "${pending_files[@]}" > pending_files.txt
+            echo "none=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy pending SQL scripts
+        if: steps.pending.outputs.none == 'false'
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
         run: |
-          for file in processed_sql/*.sql; do
-            echo "🚀 Ejecutando ${file}"
-            snow sql -q "EXECUTE IMMEDIATE FROM '${file}'" || exit 1
-          done
+          while read file; do
+            version=$(basename "$file" .sql | cut -d'_' -f3)
+            echo "🚀 Deploying $file to ${{ github.event.inputs.environment }} (version $version)"
+
+            # Preprocesar prefijos de entorno si lo necesitas
+            sed -E "s/\bDEV_/$(echo "${{ steps.envmap.outputs.prefix }}")/g" "$file" > tmp.sql
+
+            # Ejecutar el SQL
+            snow sql -q "USE ROLE ${{ steps.envmap.outputs.role }};
+                         USE WAREHOUSE ${{ steps.envmap.outputs.warehouse }};
+                         !source tmp.sql;"
+
+            # Registrar éxito
+            snow sql -q "
+              INSERT INTO CICD_CONTROL.DEPLOYMENTS.DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
+              VALUES (upper('${{ github.event.inputs.environment }}'), '$version', 'SUCCESS', '${{ github.actor }}');
+            "
+          done < pending_files.txt
+
+      - name: Done
+        run: echo "✅ Deployment complete."
