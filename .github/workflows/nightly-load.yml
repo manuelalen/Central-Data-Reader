@@ -1,0 +1,124 @@
+name: DEV Nightly load (17:17 Europe/Madrid)
+
+on:
+  schedule:
+    # 17:15 Europe/Madrid ≈ 16:15 UTC
+    - cron: '15 17 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-cli-action@v2.0
+        with:
+          python-cache-dependency-glob: ""
+
+      - name: Configure Snow CLI profile (default → DEV)
+        shell: bash
+        env:
+          SF_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER:      ${{ secrets.SNOWFLAKE_USER }}
+          SF_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SF_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}        # ej: DEV_ROLE / CICD_ADMIN_ROLE
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}   # ej: DEV_WH
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p ~/.snowflake && chmod 700 ~/.snowflake
+          cat > ~/.snowflake/config.toml <<EOF
+          [connections.default]
+          account = "${SF_ACCOUNT}"
+          user = "${SF_USER}"
+          password = "${SF_PASSWORD}"
+          role = "${SF_ROLE}"
+          warehouse = "${SF_WAREHOUSE}"
+          authenticator = "snowflake"
+          client_session_keep_alive = true
+          EOF
+          chmod 600 ~/.snowflake/config.toml
+          export SF_SKIP_WARNING_FOR_READ_PERMISSIONS_ON_CONFIG_FILE=true
+          snow --version
+          snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
+
+      - name: Create/replace DEV staging table
+        shell: bash
+        run: |
+          snow sql --query "
+            CREATE OR REPLACE TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS (
+              MATRICULA VARCHAR(50),
+              DNI_PROPIETARIO VARCHAR(50),
+              MARCA_VEHICULO VARCHAR(99),
+              PROVINCIA VARCHAR(50),
+              MUNICIPIO VARCHAR(50),
+              FECHA_PROPIETARIO VARCHAR(50),
+              T_REC_INS_TST TIMESTAMP_NTZ(9),
+              T_REC_UPD_TST TIMESTAMP_NTZ(9)
+            );
+          "
+
+      - name: Run scripts/cleanup_data.sql (optional)
+        shell: bash
+        run: |
+          if [ -f "scripts/cleanup_data.sql" ]; then
+            echo "Running scripts/cleanup_data.sql ..."
+            snow sql --filename "scripts/cleanup_data.sql"
+          else
+            echo "⚠️ scripts/cleanup_data.sql no existe; se omite."
+          fi
+
+      - name: Ensure DEV destination tables exist (idempotent)
+        shell: bash
+        run: |
+          snow sql --query "
+            CREATE TABLE IF NOT EXISTS DEV_BRONCE_ALAHURIN_GRANDE_VEHICULOS.AGV_STG.D_CARS (
+              MATRICULA VARCHAR(50),
+              DNI_PROPIETARIO VARCHAR(50),
+              MARCA_VEHICULO VARCHAR(99),
+              PROVINCIA VARCHAR(50),
+              FECHA_PROPIETARIO VARCHAR(50),
+              T_REC_INS_TST TIMESTAMP_NTZ(9),
+              T_REC_UPD_TST TIMESTAMP_NTZ(9)
+            );
+          "
+          snow sql --query "
+            CREATE TABLE IF NOT EXISTS DEV_BRONCE_MALAGA_VEHICULOS.MV_STG.D_CARS (
+              MATRICULA VARCHAR(50),
+              DNI_PROPIETARIO VARCHAR(50),
+              MARCA_VEHICULO VARCHAR(99),
+              PROVINCIA VARCHAR(50),
+              FECHA_PROPIETARIO VARCHAR(50),
+              T_REC_INS_TST TIMESTAMP_NTZ(9),
+              T_REC_UPD_TST TIMESTAMP_NTZ(9)
+            );
+          "
+
+      - name: Route rows by MUNICIPIO (all in DEV)
+        shell: bash
+        run: |
+          # ALAHURIN/ALHAURIN EL GRANDE → DEV Alahurín
+          snow sql --query "
+            INSERT INTO DEV_BRONCE_ALAHURIN_GRANDE_VEHICULOS.AGV_STG.D_CARS
+              (MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST)
+            SELECT MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST
+            FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS
+            WHERE UPPER(TRIM(MUNICIPIO)) IN ('ALAHURIN EL GRANDE','ALHAURIN EL GRANDE');
+          "
+
+          # MALAGA/MÁLAGA → DEV Málaga
+          snow sql --query "
+            INSERT INTO DEV_BRONCE_MALAGA_VEHICULOS.MV_STG.D_CARS
+              (MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST)
+            SELECT MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST
+            FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS
+            WHERE UPPER(TRIM(MUNICIPIO)) IN ('MALAGA','MÁLAGA');
+          "
