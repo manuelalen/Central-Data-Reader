@@ -1,7 +1,18 @@
 -- Anonymous SQL Scripting block: metadata-driven DEV -> PROD
-BEGIN
-  LET IN_INGESTION_NAME STRING := '__ING__';
+DECLARE
+  IN_INGESTION_NAME STRING DEFAULT '__ING__';
 
+  v_cols_tgt   STRING;
+  v_partition  STRING;
+  v_orderby    STRING;
+  v_select_src STRING;
+  v_on         STRING;
+  v_set        STRING;
+  v_cols_list  STRING;
+  v_sql        STRING;
+  v_sql_trunc  STRING;
+  v_sql_ins    STRING;
+BEGIN
   FOR rec IN (
     SELECT
       ID,
@@ -19,8 +30,7 @@ BEGIN
     ORDER BY ID
   ) DO
 
-    -- columnas comunes target ∩ source (usamos target como canon del orden)
-    LET v_cols_tgt STRING;
+    -- 1) columnas comunes target ∩ source (usamos target como canon del orden)
     SELECT LISTAGG('"'||c.COLUMN_NAME||'"', ',') WITHIN GROUP (ORDER BY c.ORDINAL_POSITION)
       INTO :v_cols_tgt
     FROM IDENTIFIER(rec.T_DB||'.INFORMATION_SCHEMA.COLUMNS') c
@@ -38,14 +48,14 @@ BEGIN
       v_cols_tgt := '*';
     END IF;
 
-    -- SELECT origen con dedupe opcional
-    LET v_partition STRING;
+    -- 2) SELECT origen con dedupe opcional
+    v_partition := NULL;
     IF rec.MERGE_KEYS IS NOT NULL AND ARRAY_SIZE(rec.MERGE_KEYS) > 0 THEN
-      SELECT LISTAGG('"'||value::STRING||'"', ',') INTO :v_partition
+      SELECT LISTAGG('"'||value::STRING||'"', ',')
+        INTO :v_partition
       FROM TABLE(FLATTEN(input => rec.MERGE_KEYS));
     END IF;
 
-    LET v_orderby STRING;
     IF rec.DEDUPE_ORDER IS NOT NULL AND ARRAY_SIZE(rec.DEDUPE_ORDER) > 0 THEN
       SELECT LISTAGG('COALESCE("'||value::STRING||'", TO_TIMESTAMP_NTZ(0)) DESC NULLS LAST, ', '')
              || '1=1'
@@ -55,7 +65,6 @@ BEGIN
       v_orderby := '1=1';
     END IF;
 
-    LET v_select_src STRING;
     IF v_partition IS NOT NULL THEN
       v_select_src := 'SELECT '||v_cols_tgt||'
                        FROM (
@@ -71,23 +80,21 @@ BEGIN
                        FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"';
     END IF;
 
-    -- MERGE si hay claves; si no, TRUNCATE+INSERT
+    -- 3) MERGE si hay claves; si no, TRUNCATE+INSERT
     IF rec.MERGE_KEYS IS NOT NULL AND ARRAY_SIZE(rec.MERGE_KEYS) > 0 THEN
-      LET v_on STRING;
       SELECT LISTAGG('NVL(T."'||value::STRING||'", '''') = NVL(S."'||value::STRING||'", '''')', ' AND ')
         INTO :v_on
       FROM TABLE(FLATTEN(input => rec.MERGE_KEYS));
 
-      LET v_set STRING;
       SELECT LISTAGG('T."'||c.COLUMN_NAME||'" = S."'||c.COLUMN_NAME||'"', ', ')
         INTO :v_set
       FROM IDENTIFIER(rec.T_DB||'.INFORMATION_SCHEMA.COLUMNS') c
       WHERE c.TABLE_SCHEMA = rec.T_SC AND c.TABLE_NAME = rec.T_TB
         AND POSITION('"'||c.COLUMN_NAME||'"', v_cols_tgt) > 0;
 
-      LET v_cols_list STRING := v_cols_tgt;
+      v_cols_list := v_cols_tgt;
 
-      LET v_sql STRING := '
+      v_sql := '
         MERGE INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" AS T
         USING ('||v_select_src||') AS S
         ON '||v_on||'
@@ -98,10 +105,10 @@ BEGIN
       EXECUTE IMMEDIATE v_sql;
 
     ELSE
-      LET v_sql_trunc STRING := 'TRUNCATE TABLE "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'";';
+      v_sql_trunc := 'TRUNCATE TABLE "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'";';
       EXECUTE IMMEDIATE v_sql_trunc;
 
-      LET v_sql_ins STRING := '
+      v_sql_ins := '
         INSERT INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" ('||v_cols_tgt||')
         '||v_select_src||';
       ';
