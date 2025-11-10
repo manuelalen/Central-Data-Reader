@@ -1,0 +1,45 @@
+name: Deploy PROD (branch main)
+on:
+  push:
+    branches: [ "main" ]   # o "prod"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-cli-action@v2.0
+        with:
+          use-oidc: true
+
+      - name: Fetch latest repo in Snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+        run: |
+          snow sql -q "
+            USE ROLE PROD_ROLE;
+            USE DATABASE PROD_BRONCE_CARS_PROPERTIES;
+            USE SCHEMA CP_STG;
+            ALTER GIT REPOSITORY GITHUB_REPO FETCH;
+          "
+
+      - name: Run SQL from branch main
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+        run: |
+          snow sql -q "
+            USE ROLE PROD_ROLE;
+            USE WAREHOUSE PROD_WH;
+            USE DATABASE PROD_BRONCE_CARS_PROPERTIES;
+            USE SCHEMA CP_STG;
+            EXECUTE IMMEDIATE FROM @GITHUB_REPO/branches/main/sql/001_create_db_objects.sql;
+            EXECUTE IMMEDIATE FROM @GITHUB_REPO/branches/main/sql/002_alter_things.sql;
+          "
