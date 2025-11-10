@@ -100,3 +100,11 @@ jobs:
             SELECT MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPietario, T_REC_INS_TST, T_REC_UPD_TST
             FROM DEV_BRONCE_MALAGA_VEHICULOS.MV_STG.D_CARS;
           "
+
+      - name: Insert DEV → PROD (Central)
+        shell: bash
+        run: |
+          snow sql --query "
+            INSERT INTO PROD_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS
+            SELECT *  FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS;
+          "
