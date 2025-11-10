@@ -3,7 +3,7 @@ name: DEV Nightly load (17:15 Europe/Madrid)
 on:
   # Ejecuta cada 5 minutos y filtramos por hora local para evitar líos con cambios de hora
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/59 * * * *"
   # Permite ejecutarlo manualmente
   workflow_dispatch: {}
 
