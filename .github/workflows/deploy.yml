@@ -27,7 +27,7 @@ jobs:
         with:
           python-cache-dependency-glob: ""
 
-      # Mapa ROLE/WH por entorno
+      # Mapear ROLE/WH según entorno
       - name: Map role & warehouse by environment
         id: map
         shell: bash
@@ -40,13 +40,13 @@ jobs:
             echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
           fi
 
-      # Detectar versiones pendientes (SIN conexiones guardadas; SIN prompts)
+      # Detectar versiones pendientes (sin conexiones guardadas; sin prompts)
       - name: Detect pending versions
         id: pending
         shell: bash
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_USERNAME: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
           set -euo pipefail
@@ -61,18 +61,18 @@ jobs:
           # Orden natural por versión
           printf "%s\n" "${files[@]}" | sort -V > all_files.txt
 
-          # Obtener versiones ya ejecutadas para el entorno
+          # Obtener versiones ya ejecutadas para el entorno elegido
           snow sql \
             --account "$SNOWFLAKE_ACCOUNT" \
-            --username "$SNOWFLAKE_USER" \
+            --username "$SNOWFLAKE_USERNAME" \
             --password "$SNOWFLAKE_PASSWORD" \
             --role "${{ steps.map.outputs.ROLE }}" \
             --warehouse "${{ steps.map.outputs.WH }}" \
             --database "CICD_CONTROL" \
             --schema "DEPLOYMENTS" \
             --query "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
-            --output-format csv \
-            | tail -n +2 > executed.txt
+            --format csv \
+          | tail -n +2 > executed.txt
 
           pending=()
           while read -r f; do
@@ -98,7 +98,7 @@ jobs:
         shell: bash
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_USERNAME: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
           set -euo pipefail
@@ -106,26 +106,27 @@ jobs:
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
 
-            # Ejecuta el fichero SQL directamente (sin !source, sin prompts)
+            # Ejecuta el fichero SQL directamente
             snow sql \
               --account "$SNOWFLAKE_ACCOUNT" \
-              --username "$SNOWFLAKE_USER" \
+              --username "$SNOWFLAKE_USERNAME" \
               --password "$SNOWFLAKE_PASSWORD" \
               --role "${{ steps.map.outputs.ROLE }}" \
               --warehouse "${{ steps.map.outputs.WH }}" \
               --file "$file"
 
-            # Registrar éxito
+            # Registrar éxito en el log
             snow sql \
               --account "$SNOWFLAKE_ACCOUNT" \
-              --username "$SNOWFLAKE_USER" \
+              --username "$SNOWFLAKE_USERNAME" \
               --password "$SNOWFLAKE_PASSWORD" \
               --role "${{ steps.map.outputs.ROLE }}" \
               --warehouse "${{ steps.map.outputs.WH }}" \
               --database "CICD_CONTROL" \
               --schema "DEPLOYMENTS" \
               --query "INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
-                       VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');"
+                       VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');" \
+              --format csv
           done < pending.txt
 
       - name: Done
