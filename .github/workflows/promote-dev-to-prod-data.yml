@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   promote:
-    # Corre si el nightly fue OK o si lo lanzas manualmente
+    # Solo si el nightly fue OK o si es manual
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: prod
@@ -28,10 +28,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify template exists
+      - name: Verify SQL template exists
         shell: bash
         run: |
-          test -f scripts/run_ingestion.sql.tmpl || { echo "scripts/run_ingestion.sql.tmpl no existe"; exit 1; }
+          test -f scripts/run_ingestion.sql.tmpl || { echo "❌ Falta scripts/run_ingestion.sql.tmpl"; exit 1; }
 
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-cli-action@v2.0
@@ -44,8 +44,8 @@ jobs:
           SF_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SF_USER:      ${{ secrets.SNOWFLAKE_USER }}
           SF_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
-          SF_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}        # Rol con SELECT en DEV_* y WRITE en PROD_*
-          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}   # p.ej. PROD_WH
+          SF_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
         run: |
           set -euo pipefail
           umask 077
@@ -72,10 +72,10 @@ jobs:
           ING="${{ github.event.inputs.ingestion_name }}"
           if [ -z "${ING:-}" ]; then ING="1.INGESTION-TO-PROD"; fi
           sed "s/__ING__/${ING//\//\\/}/g" scripts/run_ingestion.sql.tmpl > run_ingestion.sql
-          echo "== run_ingestion.sql (first 25) =="
-          head -n 25 run_ingestion.sql || true
-          echo "== run_ingestion.sql (last 25) =="
-          tail -n 25 run_ingestion.sql || true
+          echo "== run_ingestion.sql (first 30) =="
+          head -n 30 run_ingestion.sql || true
+          echo "== run_ingestion.sql (last 30) =="
+          tail -n 30 run_ingestion.sql || true
 
       - name: Execute metadata-driven promotion
         shell: bash
