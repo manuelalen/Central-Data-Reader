@@ -27,7 +27,7 @@ jobs:
         with:
           python-cache-dependency-glob: ""
 
-      # Mapear ROLE/WH según entorno
+      # Mapear ROLE/WH por entorno
       - name: Map role & warehouse by environment
         id: map
         shell: bash
@@ -58,16 +58,16 @@ jobs:
             exit 0
           fi
 
-          # Orden natural por versión
           printf "%s\n" "${files[@]}" | sort -V > all_files.txt
 
-          # Obtener versiones ya ejecutadas para el entorno elegido
-          snow sql \
+          # IMPORTANTE: flags globales ANTES de 'sql'
+          snow \
             --account "$SNOWFLAKE_ACCOUNT" \
             --username "$SNOWFLAKE_USERNAME" \
             --password "$SNOWFLAKE_PASSWORD" \
             --role "${{ steps.map.outputs.ROLE }}" \
             --warehouse "${{ steps.map.outputs.WH }}" \
+            sql \
             --database "CICD_CONTROL" \
             --schema "DEPLOYMENTS" \
             --query "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
@@ -106,22 +106,24 @@ jobs:
             ver=$(basename "$file" .sql | cut -d'_' -f3)
             echo "🚀 Ejecutando $file (versión $ver) en ${{ github.event.inputs.environment }}"
 
-            # Ejecuta el fichero SQL directamente
-            snow sql \
+            # Ejecuta el fichero SQL directamente (sin conexiones previas)
+            snow \
               --account "$SNOWFLAKE_ACCOUNT" \
               --username "$SNOWFLAKE_USERNAME" \
               --password "$SNOWFLAKE_PASSWORD" \
               --role "${{ steps.map.outputs.ROLE }}" \
               --warehouse "${{ steps.map.outputs.WH }}" \
+              sql \
               --file "$file"
 
             # Registrar éxito en el log
-            snow sql \
+            snow \
               --account "$SNOWFLAKE_ACCOUNT" \
               --username "$SNOWFLAKE_USERNAME" \
               --password "$SNOWFLAKE_PASSWORD" \
               --role "${{ steps.map.outputs.ROLE }}" \
               --warehouse "${{ steps.map.outputs.WH }}" \
+              sql \
               --database "CICD_CONTROL" \
               --schema "DEPLOYMENTS" \
               --query "INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
@@ -130,4 +132,4 @@ jobs:
           done < pending.txt
 
       - name: Done
-        run: echo "✅ Despliegue completado sin prompts ni flags inválidos."
+        run: echo "✅ Despliegue completado sin prompts ni conexiones por defecto."
