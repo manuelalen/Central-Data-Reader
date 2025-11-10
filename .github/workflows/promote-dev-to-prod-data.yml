@@ -1,0 +1,102 @@
+name: Promote DEV data → PROD (cars)
+
+on:
+  # Se dispara automáticamente cuando finaliza el nightly de DEV
+  workflow_run:
+    workflows: ["DEV Nightly load (17:17 Europe/Madrid)"]
+    types: [completed]
+  # Opcional: poder lanzarlo a mano
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    # Solo corre si el nightly terminó OK
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    # Usa secrets del environment 'prod' (rol con permisos de lectura en DEV y escritura en PROD)
+    environment: prod
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-cli-action@v2.0
+        with:
+          python-cache-dependency-glob: ""
+
+      - name: Configure Snow CLI profile (default → PROD role)
+        shell: bash
+        env:
+          SF_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER:      ${{ secrets.SNOWFLAKE_USER }}
+          SF_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SF_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}        # Rol con SELECT en DEV_* y INSERT en PROD_*
+          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}   # Ej: PROD_WH
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p ~/.snowflake && chmod 700 ~/.snowflake
+          cat > ~/.snowflake/config.toml <<EOF
+          [connections.default]
+          account = "${SF_ACCOUNT}"
+          user = "${SF_USER}"
+          password = "${SF_PASSWORD}"
+          role = "${SF_ROLE}"
+          warehouse = "${SF_WAREHOUSE}"
+          authenticator = "snowflake"
+          client_session_keep_alive = true
+          EOF
+          chmod 600 ~/.snowflake/config.toml
+          export SF_SKIP_WARNING_FOR_READ_PERMISSIONS_ON_CONFIG_FILE=true
+          snow --version
+          snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
+
+      - name: Ensure PROD target tables exist (idempotent)
+        shell: bash
+        run: |
+          snow sql --query "
+            CREATE TABLE IF NOT EXISTS PROD_BRONCE_ALAHURIN_GRANDE_VEHICULOS.AGV_STG.D_CARS (
+              MATRICULA VARCHAR(50),
+              DNI_PROPIETARIO VARCHAR(50),
+              MARCA_VEHICULO VARCHAR(99),
+              PROVINCIA VARCHAR(50),
+              FECHA_PROPIETARIO VARCHAR(50),
+              T_REC_INS_TST TIMESTAMP_NTZ(9),
+              T_REC_UPD_TST TIMESTAMP_NTZ(9)
+            );
+          "
+          snow sql --query "
+            CREATE TABLE IF NOT EXISTS PROD_BRONCE_MALAGA_VEHICULOS.MV_STG.D_CARS (
+              MATRICULA VARCHAR(50),
+              DNI_PROPIETARIO VARCHAR(50),
+              MARCA_VEHICULO VARCHAR(99),
+              PROVINCIA VARCHAR(50),
+              FECHA_PROPIETARIO VARCHAR(50),
+              T_REC_INS_TST TIMESTAMP_NTZ(9),
+              T_REC_UPD_TST TIMESTAMP_NTZ(9)
+            );
+          "
+
+      - name: Insert DEV → PROD (Alhaurín)
+        shell: bash
+        run: |
+          snow sql --query "
+            INSERT INTO PROD_BRONCE_ALAHURIN_GRANDE_VEHICULOS.AGV_STG.D_CARS
+              (MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST)
+            SELECT MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPietario, T_REC_INS_TST, T_REC_UPD_TST
+            FROM DEV_BRONCE_ALAHURIN_GRANDE_VEHICULOS.AGV_STG.D_CARS;
+          "
+
+      - name: Insert DEV → PROD (Málaga)
+        shell: bash
+        run: |
+          snow sql --query "
+            INSERT INTO PROD_BRONCE_MALAGA_VEHICULOS.MV_STG.D_CARS
+              (MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST)
+            SELECT MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, FECHA_PROPietario, T_REC_INS_TST, T_REC_UPD_TST
+            FROM DEV_BRONCE_MALAGA_VEHICULOS.MV_STG.D_CARS;
+          "
