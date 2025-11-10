@@ -1,12 +1,10 @@
 name: Promote DEV → PROD (metadata-driven, depends on nightly)
 
 on:
-  # 🚦 DEPENDENCIA: se lanza cuando acaba el nightly y solo si termina OK
   workflow_run:
     workflows: ["DEV Nightly load (17:15 Europe/Madrid)"]
     types: [completed]
 
-  # Opcional: poder ejecutarlo manualmente desde Actions
   workflow_dispatch:
     inputs:
       ingestion_name:
@@ -19,10 +17,9 @@ permissions:
 
 jobs:
   promote:
-    # Solo corre si el nightly terminó con éxito o si lo lanzas manualmente
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    environment: prod  # usa los secrets del entorno PROD
+    environment: prod
 
     steps:
       - name: Checkout repository
@@ -59,13 +56,127 @@ jobs:
           export SF_SKIP_WARNING_FOR_READ_PERMISSIONS_ON_CONFIG_FILE=true
           snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
 
-      - name: Run metadata-driven ingestion (DEV → PROD)
+      - name: Run metadata-driven promotion (anonymous SQL block)
         shell: bash
         run: |
           ING="${{ github.event.inputs.ingestion_name }}"
           if [ -z "$ING" ]; then ING="1.INGESTION-TO-PROD"; fi
-          echo "🚀 Ejecutando SP_RUN_INGESTION('$ING')..."
-          snow sql --query "CALL DEV_BRONCE_CARS_PROPERTIES.CP_STG.SP_RUN_INGESTION('$ING');"
+          echo "Running ingestion name: $ING"
 
-      - name: Done
-        run: echo "✅ Promotion DEV → PROD completada."
+          cat > run_ingestion.sql <<'SQL'
+          -- Anonymous SQL Scripting block: metadata-driven DEV -> PROD
+          -- Reads DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA and executes MERGE or TRUNCATE+INSERT per row.
+          BEGIN
+            LET IN_INGESTION_NAME STRING := '${ING}';
+            FOR rec IN (
+              SELECT
+                ID,
+                SOURCE:database::STRING  AS S_DB,
+                SOURCE:schema::STRING    AS S_SC,
+                SOURCE:table::STRING     AS S_TB,
+                TARGET:database::STRING  AS T_DB,
+                TARGET:schema::STRING    AS T_SC,
+                TARGET:table::STRING     AS T_TB,
+                MERGE_KEYS,
+                DEDUPE_ORDER
+              FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
+              WHERE ACTIVE = TRUE
+                AND INGESTION_NAME = IN_INGESTION_NAME
+              ORDER BY ID
+            ) DO
+              -- columnas comunes target ∩ source
+              LET v_cols_tgt STRING;
+              SELECT LISTAGG('"'||c.COLUMN_NAME||'"', ',')  WITHIN GROUP (ORDER BY c.ORDINAL_POSITION)
+                INTO :v_cols_tgt
+              FROM IDENTIFIER(rec.T_DB||'.INFORMATION_SCHEMA.COLUMNS') c
+              WHERE c.TABLE_SCHEMA = rec.T_SC
+                AND c.TABLE_NAME   = rec.T_TB
+                AND EXISTS (
+                  SELECT 1
+                  FROM IDENTIFIER(rec.S_DB||'.INFORMATION_SCHEMA.COLUMNS') s
+                  WHERE s.TABLE_SCHEMA = rec.S_SC
+                    AND s.TABLE_NAME   = rec.S_TB
+                    AND s.COLUMN_NAME  = c.COLUMN_NAME
+                );
+
+              IF v_cols_tgt IS NULL THEN
+                v_cols_tgt := '*';
+              END IF;
+
+              -- construir SELECT origen con posible dedupe
+              LET v_partition STRING;
+              IF rec.MERGE_KEYS IS NOT NULL AND ARRAY_SIZE(rec.MERGE_KEYS) > 0 THEN
+                SELECT LISTAGG('"'||value::STRING||'"', ',') INTO :v_partition
+                FROM TABLE(FLATTEN(input => rec.MERGE_KEYS));
+              END IF;
+
+              LET v_orderby STRING;
+              IF rec.DEDUPE_ORDER IS NOT NULL AND ARRAY_SIZE(rec.DEDUPE_ORDER) > 0 THEN
+                SELECT LISTAGG('COALESCE("'||value::STRING||'", TO_TIMESTAMP_NTZ(0)) DESC NULLS LAST, ', '')
+                       || '1=1'
+                  INTO :v_orderby
+                FROM TABLE(FLATTEN(input => rec.DEDUPE_ORDER));
+              ELSE
+                v_orderby := '1=1';
+              END IF;
+
+              LET v_select_src STRING;
+              IF v_partition IS NOT NULL THEN
+                v_select_src := 'SELECT '||v_cols_tgt||'
+                                 FROM (
+                                   SELECT *
+                                   FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"
+                                   QUALIFY ROW_NUMBER() OVER (
+                                     PARTITION BY '||v_partition||'
+                                     ORDER BY '||v_orderby||'
+                                   ) = 1
+                                 )';
+              ELSE
+                v_select_src := 'SELECT '||v_cols_tgt||'
+                                 FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"';
+              END IF;
+
+              IF rec.MERGE_KEYS IS NOT NULL AND ARRAY_SIZE(rec.MERGE_KEYS) > 0 THEN
+                -- MERGE
+                LET v_on STRING;
+                SELECT LISTAGG('NVL(T."'||value::STRING||'", '''') = NVL(S."'||value::STRING||'", '''')', ' AND ')
+                  INTO :v_on
+                FROM TABLE(FLATTEN(input => rec.MERGE_KEYS));
+
+                LET v_set STRING;
+                SELECT LISTAGG('T."'||c.COLUMN_NAME||'" = S."'||c.COLUMN_NAME||'"', ', ')
+                  INTO :v_set
+                FROM IDENTIFIER(rec.T_DB||'.INFORMATION_SCHEMA.COLUMNS') c
+                WHERE c.TABLE_SCHEMA = rec.T_SC AND c.TABLE_NAME = rec.T_TB
+                  AND POSITION('"'||c.COLUMN_NAME||'"', v_cols_tgt) > 0;
+
+                LET v_cols_list STRING := v_cols_tgt;
+                LET v_sql STRING := '
+                  MERGE INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" AS T
+                  USING ('||v_select_src||') AS S
+                  ON '||v_on||'
+                  WHEN MATCHED THEN UPDATE SET '||v_set||'
+                  WHEN NOT MATCHED THEN INSERT ('||v_cols_list||')
+                  VALUES ('||REPLACE(v_cols_list, '"', 'S."')||');
+                ';
+                EXECUTE IMMEDIATE v_sql;
+                CALL SYSTEM$LOG_INFO('Merged '||rec.S_DB||'.'||rec.S_SC||'.'||rec.S_TB||' -> '||rec.T_DB||'.'||rec.T_SC||'.'||rec.T_TB);
+
+              ELSE
+                -- TRUNCATE + INSERT
+                LET v_sql_trunc STRING := 'TRUNCATE TABLE "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'";';
+                EXECUTE IMMEDIATE v_sql_trunc;
+
+                LET v_sql_ins STRING := '
+                  INSERT INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" ('||v_cols_tgt||')
+                  '||v_select_src||';
+                ';
+                EXECUTE IMMEDIATE v_sql_ins;
+                CALL SYSTEM$LOG_INFO('Replaced '||rec.T_DB||'.'||rec.T_SC||'.'||rec.T_TB||' from '||rec.S_DB||'.'||rec.S_SC||'.'||rec.S_TB);
+              END IF;
+
+            END FOR;
+          END;
+          SQL
+
+          snow sql --filename run_ingestion.sql
