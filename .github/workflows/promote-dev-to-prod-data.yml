@@ -1,9 +1,12 @@
 name: Promote DEV → PROD (metadata-driven, depends on nightly)
 
 on:
+  # Depende del nightly
   workflow_run:
     workflows: ["DEV Nightly load (17:15 Europe/Madrid)"]
     types: [completed]
+
+  # Opcional: ejecución manual
   workflow_dispatch:
     inputs:
       ingestion_name:
@@ -16,6 +19,7 @@ permissions:
 
 jobs:
   promote:
+    # Solo si el nightly fue OK o si es manual
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: prod
