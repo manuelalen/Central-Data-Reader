@@ -1,9 +1,11 @@
--- Ejecuta MERGE por cada fila de T_METADATA para la ingestión indicada.
--- Modelo A: 1 fila por matrícula (dedupe en USING; clave MERGE = MATRICULA)
 EXECUTE IMMEDIATE $$
 DECLARE
   IN_INGESTION_NAME STRING DEFAULT '__ING__';
-  v_sql STRING;
+  v_sql   STRING;
+
+  -- variables escalares para los identificadores
+  v_s_db  STRING; v_s_sc STRING; v_s_tb STRING;
+  v_t_db  STRING; v_t_sc STRING; v_t_tb STRING;
 BEGIN
   FOR rec IN (
     SELECT
@@ -19,7 +21,11 @@ BEGIN
     ORDER BY ID
   ) DO
 
-    v_sql := 'MERGE INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" AS T
+    -- pasar del registro del cursor a variables escalares
+    v_s_db := rec.S_DB;  v_s_sc := rec.S_SC;  v_s_tb := rec.S_TB;
+    v_t_db := rec.T_DB;  v_t_sc := rec.T_SC;  v_t_tb := rec.T_TB;
+
+    v_sql := 'MERGE INTO "'||v_t_db||'"."'||v_t_sc||'"."'||v_t_tb||'" AS T
 USING (
   SELECT *
   FROM (
@@ -28,7 +34,7 @@ USING (
              PARTITION BY d.MATRICULA
              ORDER BY COALESCE(d.T_REC_UPD_TST, d.T_REC_INS_TST, TO_TIMESTAMP_NTZ(0)) DESC
            ) AS rn
-    FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'" d
+    FROM "'||v_s_db||'"."'||v_s_sc||'"."'||v_s_tb||'" d
   )
   WHERE rn = 1
 ) AS S
