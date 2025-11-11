@@ -3,7 +3,7 @@ DECLARE
   IN_INGESTION_NAME STRING DEFAULT '__ING__';
   v_block STRING;
 BEGIN
-  /* 1) Construimos un bloque BEGIN ... END; que contiene N sentencias MERGE separadas por ';' */
+  /* Construimos un único bloque BEGIN...END con todos los MERGE */
   SELECT
     'BEGIN ' || LISTAGG(stmt, ' ') || ' END;'
   INTO :v_block
@@ -45,11 +45,13 @@ WHEN NOT MATCHED THEN
   );' AS stmt
     FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
     WHERE ACTIVE = TRUE
-      AND INGESTION_NAME = IN_INGESTION_NAME
+      AND INGESTION_NAME = :IN_INGESTION_NAME   -- <<<<< AQUÍ EL ':'
     ORDER BY ID
   );
 
-  /* 2) Ejecutamos el bloque con todos los MERGE de una vez */
-  EXECUTE IMMEDIATE :v_block;
+  /* Ejecutamos el bloque con todos los MERGE */
+  IF v_block IS NOT NULL THEN
+    EXECUTE IMMEDIATE v_block;
+  END IF;
 END;
 $$;
