@@ -1,0 +1,29 @@
+{
+	"name": "MY_PARQUET",
+	"properties": {
+		"linkedServiceName": {
+			"referenceName": "LS_ADLS_RAW",
+			"type": "LinkedServiceReference"
+		},
+		"parameters": {
+			"src_folder": {
+				"type": "string"
+			}
+		},
+		"annotations": [],
+		"type": "Parquet",
+		"typeProperties": {
+			"location": {
+				"type": "AzureBlobStorageLocation",
+				"folderPath": {
+					"value": "@concat(\n    dataset().src_folder\n    ,'/year='\n    ,formatDateTime(utcnow(),'yyyy')\n    ,'/month='\n    ,formatDateTime(utcnow(),'MM')\n    ,'/day='\n    ,formatDateTime(utcnow(),'dd')\n)",
+					"type": "Expression"
+				},
+				"container": "raw"
+			},
+			"compressionCodec": "snappy"
+		},
+		"schema": []
+	},
+	"type": "Microsoft.DataFactory/factories/datasets"
+}
