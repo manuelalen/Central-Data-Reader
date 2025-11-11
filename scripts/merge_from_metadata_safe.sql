@@ -1,0 +1,109 @@
+-- scripts/merge_from_metadata_safe.sql
+-- Aplica MERGE DEV -> TARGET por cada fila activa de T_METADATA (INGESTION_NAME = __ING__).
+-- Dedupe por MATRICULA y usa únicamente columnas comunes entre SOURCE y TARGET.
+
+EXECUTE IMMEDIATE $$
+DECLARE
+  IN_INGESTION_NAME STRING DEFAULT '__ING__';
+
+  v_s_db STRING; v_s_sc STRING; v_s_tb STRING;
+  v_t_db STRING; v_t_sc STRING; v_t_tb STRING;
+
+  v_cols_list STRING;   -- "COL1","COL2",...
+  v_set_list  STRING;   -- T."COL" = S."COL", ...
+  v_vals_list STRING;   -- S."COL", S."COL2", ...
+  v_sql       STRING;
+BEGIN
+  FOR rec IN (
+    SELECT
+      SOURCE:database::STRING  AS S_DB,
+      SOURCE:schema::STRING    AS S_SC,
+      SOURCE:table::STRING     AS S_TB,
+      TARGET:database::STRING  AS T_DB,
+      TARGET:schema::STRING    AS T_SC,
+      TARGET:table::STRING     AS T_TB
+    FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
+    WHERE ACTIVE = TRUE
+      AND INGESTION_NAME = :IN_INGESTION_NAME
+    ORDER BY ID
+  ) DO
+    -- 1) Copiamos a variables escalares
+    v_s_db := rec.S_DB;  v_s_sc := rec.S_SC;  v_s_tb := rec.S_TB;
+    v_t_db := rec.T_DB;  v_t_sc := rec.T_SC;  v_t_tb := rec.T_TB;
+
+    -- 2) Columnas comunes (según el orden del TARGET)
+    SELECT LISTAGG('"'||c.COLUMN_NAME||'"', ',') WITHIN GROUP (ORDER BY c.ORDINAL_POSITION)
+      INTO :v_cols_list
+    FROM IDENTIFIER(:v_t_db||'.INFORMATION_SCHEMA.COLUMNS') c
+    WHERE c.TABLE_SCHEMA = :v_t_sc
+      AND c.TABLE_NAME   = :v_t_tb
+      AND EXISTS (
+        SELECT 1
+        FROM IDENTIFIER(:v_s_db||'.INFORMATION_SCHEMA.COLUMNS') s
+        WHERE s.TABLE_SCHEMA = :v_s_sc
+          AND s.TABLE_NAME   = :v_s_tb
+          AND s.COLUMN_NAME  = c.COLUMN_NAME
+      );
+
+    IF v_cols_list IS NULL THEN
+      -- Sin columnas en común, no hay nada que fusionar
+      CONTINUE;
+    END IF;
+
+    -- 3) SET list para UPDATE: T."COL" = S."COL"
+    SELECT LISTAGG('T."'||c.COLUMN_NAME||'" = S."'||c.COLUMN_NAME||'"', ', ')
+      INTO :v_set_list
+    FROM IDENTIFIER(:v_t_db||'.INFORMATION_SCHEMA.COLUMNS') c
+    WHERE c.TABLE_SCHEMA = :v_t_sc
+      AND c.TABLE_NAME   = :v_t_tb
+      AND EXISTS (
+        SELECT 1
+        FROM IDENTIFIER(:v_s_db||'.INFORMATION_SCHEMA.COLUMNS') s
+        WHERE s.TABLE_SCHEMA = :v_s_sc
+          AND s.TABLE_NAME   = :v_s_tb
+          AND s.COLUMN_NAME  = c.COLUMN_NAME
+      );
+
+    -- 4) VALUES list para INSERT: S."COL", S."COL2", ...
+    SELECT LISTAGG('S."'||c.COLUMN_NAME||'"', ', ')
+      INTO :v_vals_list
+    FROM IDENTIFIER(:v_t_db||'.INFORMATION_SCHEMA.COLUMNS') c
+    WHERE c.TABLE_SCHEMA = :v_t_sc
+      AND c.TABLE_NAME   = :v_t_tb
+      AND EXISTS (
+        SELECT 1
+        FROM IDENTIFIER(:v_s_db||'.INFORMATION_SCHEMA.COLUMNS') s
+        WHERE s.TABLE_SCHEMA = :v_s_sc
+          AND s.TABLE_NAME   = :v_s_tb
+          AND s.COLUMN_NAME  = c.COLUMN_NAME
+      );
+
+    -- 5) MERGE (modelo A): clave MATRICULA, dedupe en USING
+    v_sql := '
+MERGE INTO "'||v_t_db||'"."'||v_t_sc||'"."'||v_t_tb||'" AS T
+USING (
+  SELECT *
+  FROM (
+    SELECT d.*,
+           ROW_NUMBER() OVER (
+             PARTITION BY d.MATRICULA
+             ORDER BY COALESCE(d.T_REC_UPD_TST, d.T_REC_INS_TST, TO_TIMESTAMP_NTZ(0)) DESC
+           ) AS rn
+    FROM "'||v_s_db||'"."'||v_s_sc||'"."'||v_s_tb||'" d
+  )
+  WHERE rn = 1
+) AS S
+ON T."MATRICULA" = S."MATRICULA"
+WHEN MATCHED
+  AND COALESCE(T."T_REC_UPD_TST", T."T_REC_INS_TST", TO_TIMESTAMP_NTZ(0))
+      < COALESCE(S."T_REC_UPD_TST", S."T_REC_INS_TST", TO_TIMESTAMP_NTZ(0))
+THEN UPDATE SET
+  '||v_set_list||'
+WHEN NOT MATCHED THEN
+  INSERT ('||v_cols_list||')
+  VALUES ('||v_vals_list||');';
+
+    EXECUTE IMMEDIATE v_sql;
+  END FOR;
+END;
+$$;

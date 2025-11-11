@@ -1,0 +1,152 @@
+name: Deploy DDLs to Snowflake
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Selecciona el entorno destino"
+        required: true
+        type: choice
+        options: [sit, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-cli-action@v2.0
+        with:
+          python-cache-dependency-glob: ""
+
+      - name: Map role & warehouse by environment
+        id: map
+        shell: bash
+        run: |
+          if [ "${{ github.event.inputs.environment }}" = "sit" ]; then
+            echo "ROLE=SIT_ROLE" >> $GITHUB_OUTPUT
+            echo "WH=SIT_WH"     >> $GITHUB_OUTPUT
+            echo "PREFIX=SIT_"   >> $GITHUB_OUTPUT
+            echo "USERENV=SIT"   >> $GITHUB_OUTPUT
+          else
+            echo "ROLE=PROD_ROLE" >> $GITHUB_OUTPUT
+            echo "WH=PROD_WH"     >> $GITHUB_OUTPUT
+            echo "PREFIX=PROD_"   >> $GITHUB_OUTPUT
+            echo "USERENV=PROD"   >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure Snow CLI profile (default)
+        shell: bash
+        env:
+          SF_ACCOUNT:  ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SF_USER:     ${{ secrets.SNOWFLAKE_USER }}
+          SF_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p ~/.snowflake && chmod 700 ~/.snowflake
+          cat > ~/.snowflake/config.toml <<EOF
+          [connections.default]
+          account = "${SF_ACCOUNT}"
+          user = "${SF_USER}"
+          password = "${SF_PASSWORD}"
+          role = "${{ steps.map.outputs.ROLE }}"
+          warehouse = "${{ steps.map.outputs.WH }}"
+          authenticator = "snowflake"
+          client_session_keep_alive = true
+          EOF
+          chmod 600 ~/.snowflake/config.toml
+          export SF_SKIP_WARNING_FOR_READ_PERMISSIONS_ON_CONFIG_FILE=true
+          snow --version
+          snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
+
+      - name: Detect pending versions
+        id: pending
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(sql/R_ddls_*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "none=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          printf "%s\n" "${files[@]}" | sort -V > all_files.txt
+
+          snow sql \
+            --database "CICD_CONTROL" \
+            --schema "DEPLOYMENTS" \
+            --query "SELECT VERSION FROM DEPLOY_LOG WHERE ENVIRONMENT = UPPER('${{ github.event.inputs.environment }}');" \
+            --format csv \
+          | tail -n +2 > executed.txt || true
+
+          pending=()
+          while read -r f; do
+            ver=$(basename "$f" .sql | cut -d'_' -f3)
+            if ! grep -qx "$ver" executed.txt 2>/dev/null; then
+              pending+=("$f")
+            fi
+          done < all_files.txt
+
+          if [ ${#pending[@]} -eq 0 ]; then
+            echo "none=true" >> $GITHUB_OUTPUT
+          else
+            printf "%s\n" "${pending[@]}" > pending.txt
+            echo "none=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ⬇️ PREPROCESADO: REPLACE DEV→(SIT|PROD) + idempotencia CREATE
+      - name: Preprocess SQLs for target env (replace & idempotent)
+        if: steps.pending.outputs.none == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          while read -r file; do
+            out="build/$(basename "$file")"
+            # Reemplazos clave:
+            # 1) Cualquier identificador con prefijo DEV_ → SIT_/PROD_
+            # 2) Nombres sueltos típicos: DEV_CDR, DEV_ROLE, DEV_WH
+            # 3) Idempotencia en CREATE (IF NOT EXISTS)
+            sed -E \
+              -e "s/\bDEV_/$(printf "%s" "${{ steps.map.outputs.PREFIX }}" | sed 's/[\/&]/\\&/g')/g" \
+              -e "s/\bDEV_CDR\b/${{ steps.map.outputs.USERENV }}_CDR/g" \
+              -e "s/\bDEV_ROLE\b/${{ steps.map.outputs.PREFIX }}ROLE/g" \
+              -e "s/\bDEV_WH\b/${{ steps.map.outputs.PREFIX }}WH/g" \
+              -e "s/\bCREATE[[:space:]]+USER[[:space:]]+/CREATE USER IF NOT EXISTS /gI" \
+              -e "s/\bCREATE[[:space:]]+ROLE[[:space:]]+/CREATE ROLE IF NOT EXISTS /gI" \
+              -e "s/\bCREATE[[:space:]]+DATABASE[[:space:]]+/CREATE DATABASE IF NOT EXISTS /gI" \
+              -e "s/\bCREATE[[:space:]]+SCHEMA[[:space:]]+/CREATE SCHEMA IF NOT EXISTS /gI" \
+              -e "s/\bCREATE[[:space:]]+TABLE[[:space:]]+/CREATE TABLE IF NOT EXISTS /gI" \
+              "$file" > "$out"
+            echo "Prepared: $out"
+          done < pending.txt
+
+      - name: Deploy pending SQLs (processed)
+        if: steps.pending.outputs.none == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while read -r file; do
+            ver=$(basename "$file" .sql | cut -d'_' -f3)
+            pfile="build/$(basename "$file")"
+            echo "🚀 Ejecutando: $pfile (versión $ver)"
+            snow sql --filename "$pfile"
+
+            snow sql \
+              --database "CICD_CONTROL" \
+              --schema "DEPLOYMENTS" \
+              --query "INSERT INTO DEPLOY_LOG (ENVIRONMENT, VERSION, STATUS, EXECUTED_BY)
+                       VALUES (UPPER('${{ github.event.inputs.environment }}'), '$ver', 'SUCCESS', '${{ github.actor }}');" \
+              --format csv
+          done < pending.txt
+
+      - name: Done
+        run: echo "✅ Despliegue completado en ${{ github.event.inputs.environment }} (con replace DEV→${{ steps.map.outputs.PREFIX }})."

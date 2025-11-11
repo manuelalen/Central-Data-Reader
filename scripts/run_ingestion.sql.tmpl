@@ -1,0 +1,64 @@
+-- Metadata-driven DEV -> PROD in one statement (truncate+insert)
+-- Requisitos: mismo esquema/orden de columnas entre SOURCE y TARGET.
+-- Dedup opcional si hay MERGE_KEYS + DEDUPE_ORDER en metadata.
+
+EXECUTE IMMEDIATE $$
+DECLARE
+  IN_INGESTION_NAME STRING DEFAULT '__ING__';
+
+  v_partition  STRING;
+  v_orderby    STRING;
+  v_select_src STRING;
+  v_sql        STRING;
+BEGIN
+  FOR rec IN (
+    SELECT
+      ID,
+      SOURCE:database::STRING  AS S_DB,
+      SOURCE:schema::STRING    AS S_SC,
+      SOURCE:table::STRING     AS S_TB,
+      TARGET:database::STRING  AS T_DB,
+      TARGET:schema::STRING    AS T_SC,
+      TARGET:table::STRING     AS T_TB,
+      MERGE_KEYS,
+      DEDUPE_ORDER
+    FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
+    WHERE ACTIVE = TRUE
+      AND INGESTION_NAME = IN_INGESTION_NAME
+    ORDER BY ID
+  ) DO
+
+    -- 1) SELECT origen con dedupe opcional (si hay MERGE_KEYS)
+    v_partition := NULL;
+    IF rec.MERGE_KEYS IS NOT NULL AND ARRAY_SIZE(rec.MERGE_KEYS) > 0 THEN
+      SELECT LISTAGG('"'||value::STRING||'"', ',')
+        INTO :v_partition
+      FROM TABLE(FLATTEN(input => rec.MERGE_KEYS));
+    END IF;
+
+    IF rec.DEDUPE_ORDER IS NOT NULL AND ARRAY_SIZE(rec.DEDUPE_ORDER) > 0 THEN
+      SELECT LISTAGG('COALESCE("'||value::STRING||'", TO_TIMESTAMP_NTZ(0)) DESC NULLS LAST, ', '')
+             || '1=1'
+        INTO :v_orderby
+      FROM TABLE(FLATTEN(input => rec.DEDUPE_ORDER));
+    ELSE
+      v_orderby := '1=1';
+    END IF;
+
+    IF v_partition IS NOT NULL THEN
+      v_select_src := 'SELECT * FROM ( SELECT * FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"
+                       QUALIFY ROW_NUMBER() OVER (PARTITION BY '||v_partition||' ORDER BY '||v_orderby||') = 1 )';
+    ELSE
+      v_select_src := 'SELECT * FROM "'||rec.S_DB||'"."'||rec.S_SC||'"."'||rec.S_TB||'"';
+    END IF;
+
+    -- 2) Reemplazo de datos en TARGET: TRUNCATE + INSERT SELECT *
+    v_sql := 'TRUNCATE TABLE "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'";';
+    EXECUTE IMMEDIATE v_sql;
+
+    v_sql := 'INSERT INTO "'||rec.T_DB||'"."'||rec.T_SC||'"."'||rec.T_TB||'" '||v_select_src||';';
+    EXECUTE IMMEDIATE v_sql;
+
+  END FOR;
+END;
+$$;
