@@ -1,0 +1,9 @@
+{
+	"name": "FAB-DATA-PL",
+	"location": "spaincentral",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "59fac71c-ff14-40c8-8161-7067b1b36854",
+		"tenantId": "1b15826d-4233-48c7-9fd7-acc6563985fa"
+	}
+}

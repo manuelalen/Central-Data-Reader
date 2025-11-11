@@ -1,0 +1,89 @@
+{
+	"name": "PL_DAT_RAW_TO_SNW",
+	"properties": {
+		"activities": [
+			{
+				"name": "metadata lookup",
+				"type": "Lookup",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "SnowflakeV2Source",
+						"query": "SELECT * FROM DEV_BRONCE_TRA_PCS.TRA_STG.T_METADATA\nWHERE INGESTION_NAME = '2.PCS-EXCHANGE-TO-STG' AND ACTIVE = 1",
+						"exportSettings": {
+							"type": "SnowflakeExportCopyCommand"
+						},
+						"treatDecimalAsString": false
+					},
+					"dataset": {
+						"referenceName": "SnowflakeTable1",
+						"type": "DatasetReference"
+					},
+					"firstRowOnly": false
+				}
+			},
+			{
+				"name": "COPY INTO",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "metadata lookup",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('metadata lookup').output.value",
+						"type": "Expression"
+					},
+					"activities": [
+						{
+							"name": "ACT_CI_SNW",
+							"type": "Script",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"linkedServiceName": {
+								"referenceName": "LS_SNOWFLAKE",
+								"type": "LinkedServiceReference"
+							},
+							"typeProperties": {
+								"scripts": [
+									{
+										"type": "Query",
+										"text": {
+											"value": "@concat(\n    'USE DATABASE ', json(item().TARGET).database, '; ',\n    'USE SCHEMA ', json(item().TARGET).schema, '; ',\n    'COPY INTO ',\n        json(item().TARGET).database, '.', json(item().TARGET).schema, '.', toUpper(json(item().TARGET).TABLE), ' ',\n    'FROM ''@AZURE_RAW_STAGE_SAS/pieces/year=', formatDateTime(utcNow(),'yyyy'),\n    '/month=', formatDateTime(utcNow(),'MM'),\n    '/day=', formatDateTime(utcNow(),'dd'),\n    '/', toLower(json(item().SOURCE).file), '.parquet'' ',\n    'FILE_FORMAT = ''FF_PARQUET_SNAPPY'' ',\n    'ON_ERROR = ABORT_STATEMENT ',\n    'MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE ',\n    'FORCE = TRUE;'\n)",
+											"type": "Expression"
+										}
+									}
+								],
+								"scriptBlockExecutionTimeout": "02:00:00",
+								"treatDecimalAsString": true
+							}
+						}
+					]
+				}
+			}
+		],
+		"annotations": [],
+		"lastPublishTime": "2025-11-08T03:33:18Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}

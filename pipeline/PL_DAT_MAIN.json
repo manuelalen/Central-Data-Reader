@@ -1,0 +1,49 @@
+{
+	"name": "PL_DAT_MAIN",
+	"properties": {
+		"activities": [
+			{
+				"name": "PL_DAT_EXC_TO_RAW",
+				"type": "ExecutePipeline",
+				"dependsOn": [],
+				"policy": {
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"pipeline": {
+						"referenceName": "PL_DAT_EXC_TO_RAW",
+						"type": "PipelineReference"
+					},
+					"waitOnCompletion": true
+				}
+			},
+			{
+				"name": "PL_DAT_RAW_TO_SNW",
+				"type": "ExecutePipeline",
+				"dependsOn": [
+					{
+						"activity": "PL_DAT_EXC_TO_RAW",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"pipeline": {
+						"referenceName": "PL_DAT_RAW_TO_SNW",
+						"type": "PipelineReference"
+					},
+					"waitOnCompletion": true
+				}
+			}
+		],
+		"annotations": [],
+		"lastPublishTime": "2025-11-08T03:20:49Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}
