@@ -1,10 +1,10 @@
 EXECUTE IMMEDIATE $$
 DECLARE
   IN_INGESTION_NAME STRING DEFAULT '__ING__';
+  v_sql STRING;
 BEGIN
-  FOR rec IN (
+  FOR c IN (
     SELECT
-      /* Construimos la sentencia completa como texto */
       'MERGE INTO "'||
         (TARGET:database)::STRING ||'"."'||
         (TARGET:schema)::STRING   ||'"."'||
@@ -47,8 +47,9 @@ WHEN NOT MATCHED THEN
       AND INGESTION_NAME = IN_INGESTION_NAME
     ORDER BY ID
   ) DO
-    /* Ejecutamos la sentencia preparada en la fila */
-    EXECUTE IMMEDIATE rec.SQL_TEXT;
+    -- Copiamos el texto a una variable escalar y ejecutamos
+    v_sql := c.SQL_TEXT::STRING;
+    EXECUTE IMMEDIATE v_sql;
   END FOR;
 END;
 $$;
