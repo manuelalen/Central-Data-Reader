@@ -11,4 +11,54 @@ create or replace TABLE DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA (
 	UPDATED_AT TIMESTAMP_NTZ(9) DEFAULT CURRENT_TIMESTAMP()
 );
 
+INSERT INTO DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA 
+(ID, INGESTION_NAME, ACTIVE, SOURCE, SOURCE_TYPE, TARGET, TARGET_TYPE, UPDATED_AT, MERGE_KEYS, DEDUPE_ORDER) 
+VALUES (1, '1.INGESTION-TO-PROD', True, '{
+  "database": "DEV_BRONCE_CARS_PROPERTIES",
+  "schema": "CP_STG",
+  "table": "D_CARS"
+}', 'table', '{
+  "database": "PROD_BRONCE_CARS_PROPERTIES",
+  "schema": "CP_STG",
+  "table": "D_CARS"
+}', 'table', '2025-11-10 14:11:54.175', '{
+  "condition": "MATRICULA"
+}', '{
+  "insert": "T_REC_INS_TST",
+  "update": "T_REC_UPD_TST"
+}');
+
+INSERT INTO DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA 
+(ID, INGESTION_NAME, ACTIVE, SOURCE, SOURCE_TYPE, TARGET, TARGET_TYPE, UPDATED_AT, MERGE_KEYS, DEDUPE_ORDER) 
+VALUES (101, '1.INGESTION-TO-PROD', True, '{
+  "database": "DEV_BRONCE_ALAHURIN_GRANDE_VEHICULOS",
+  "schema": "AGV_STG",
+  "table": "D_CARS"
+}', 'table', '{
+  "database": "PROD_BRONCE_ALAHURIN_GRANDE_VEHICULOS",
+  "schema": "AGV_STG",
+  "table": "D_CARS"
+}', 'table', '2025-11-10 14:11:54.175', '{
+  "condition": "MATRICULA"
+}', '{
+  "insert": "T_REC_INS_TST",
+  "update": "T_REC_UPD_TST"
+}');
+
+INSERT INTO DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA 
+(ID, INGESTION_NAME, ACTIVE, SOURCE, SOURCE_TYPE, TARGET, TARGET_TYPE, UPDATED_AT, MERGE_KEYS, DEDUPE_ORDER) 
+VALUES (102, '1.INGESTION-TO-PROD', True, '{
+  "database": "DEV_BRONCE_MALAGA_VEHICULOS",
+  "schema": "MV_STG",
+  "table": "D_CARS"
+}', 'table', '{
+  "database": "PROD_BRONCE_MALAGA_VEHICULOS",
+  "schema": "MV_STG",
+  "table": "D_CARS"
+}', 'table', '2025-11-10 14:11:54.175', '{
+  "condition": "MATRICULA"
+}', '{
+  "insert": "T_REC_INS_TST",
+  "update": "T_REC_UPD_TST"
+}');
 
