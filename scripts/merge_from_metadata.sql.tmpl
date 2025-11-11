@@ -1,14 +1,15 @@
 EXECUTE IMMEDIATE $$
 DECLARE
   IN_INGESTION_NAME STRING DEFAULT '__ING__';
-  v_sql STRING;
+  v_block STRING;
 BEGIN
-  FOR c IN (
+  /* 1) Construimos un bloque BEGIN ... END; que contiene N sentencias MERGE separadas por ';' */
+  SELECT
+    'BEGIN ' || LISTAGG(stmt, ' ') || ' END;'
+  INTO :v_block
+  FROM (
     SELECT
-      'MERGE INTO "'||
-        (TARGET:database)::STRING ||'"."'||
-        (TARGET:schema)::STRING   ||'"."'||
-        (TARGET:table)::STRING    ||'" AS T
+      'MERGE INTO "'||(TARGET:database)::STRING||'"."'||(TARGET:schema)::STRING||'"."'||(TARGET:table)::STRING||'" AS T
 USING (
   SELECT *
   FROM (
@@ -41,15 +42,14 @@ WHEN NOT MATCHED THEN
   VALUES (
     S.MATRICULA, S.DNI_PROPIETARIO, S.MARCA_VEHICULO, S.PROVINCIA, S.MUNICIPIO,
     S.FECHA_PROPIETARIO, S.T_REC_INS_TST, S.T_REC_UPD_TST
-  );' AS SQL_TEXT
+  );' AS stmt
     FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
     WHERE ACTIVE = TRUE
       AND INGESTION_NAME = IN_INGESTION_NAME
     ORDER BY ID
-  ) DO
-    -- Copiamos el texto a una variable escalar y ejecutamos
-    v_sql := c.SQL_TEXT::STRING;
-    EXECUTE IMMEDIATE v_sql;
-  END FOR;
+  );
+
+  /* 2) Ejecutamos el bloque con todos los MERGE de una vez */
+  EXECUTE IMMEDIATE :v_block;
 END;
 $$;
