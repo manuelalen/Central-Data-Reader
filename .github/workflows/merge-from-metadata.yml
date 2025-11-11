@@ -1,13 +1,10 @@
-name: MERGE from T_METADATA (depends on nightly)
+name: Run MERGE (safe) from T_METADATA
 
 on:
-  workflow_run:
-    workflows: ["DEV Nightly load (17:15 Europe/Madrid)"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       ingestion_name:
-        description: "INGESTION_NAME a ejecutar (T_METADATA)"
+        description: "Valor de INGESTION_NAME en T_METADATA"
         required: true
         default: "1.INGESTION-TO-PROD"
 
@@ -15,10 +12,9 @@ permissions:
   contents: read
 
 jobs:
-  run-merge:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+  run-merge-safe:
     runs-on: ubuntu-latest
-    environment: prod  # usa secretos del entorno PROD (o el que elijas)
+    environment: prod
 
     steps:
       - name: Checkout
@@ -56,21 +52,19 @@ jobs:
           snow --version
           snow sql -q "SELECT CURRENT_ACCOUNT(), CURRENT_ROLE(), CURRENT_WAREHOUSE();"
 
-      - name: Prepare SQL (inject ingestion name)
+      - name: Prepare SQL (inject ingestion)
         shell: bash
         run: |
           set -euo pipefail
           ING="${{ github.event.inputs.ingestion_name }}"
-          if [ -z "${ING:-}" ]; then ING="1.INGESTION-TO-PROD"; fi
-          sed "s/__ING__/${ING//\//\\/}/g" scripts/merge_from_metadata.sql.tmpl > run_merge.sql
-          echo "== first 25 lines ==" && head -n 25 run_merge.sql || true
-          echo "== last 25 lines =="  && tail -n 25 run_merge.sql || true
+          sed "s/__ING__/${ING//\//\\/}/g" scripts/merge_from_metadata_safe.sql > run_merge.sql
+          head -n 20 run_merge.sql || true
 
-      - name: Execute MERGE from metadata
+      - name: Execute MERGE(s)
         shell: bash
         run: |
           set -euo pipefail
           snow sql --filename run_merge.sql
 
       - name: Done
-        run: echo "✅ MERGE completado desde T_METADATA."
+        run: echo "✅ MERGE seguro ejecutado desde T_METADATA."
