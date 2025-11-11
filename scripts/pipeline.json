@@ -1,0 +1,87 @@
+{
+    "name": "PL_DAT_MI_SF",
+    "properties": {
+        "activities": [
+            {
+                "name": "metadata lookup",
+                "type": "Lookup",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "SnowflakeV2Source",
+                        "query": "SELECT * FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA\nWHERE\n1=1\nAND INGESTION_NAME = '1.INGESTION-TO-PROD'\nAND ACTIVE = TRUE\n;",
+                        "exportSettings": {
+                            "type": "SnowflakeExportCopyCommand"
+                        },
+                        "treatDecimalAsString": false
+                    },
+                    "dataset": {
+                        "referenceName": "SnowflakeTable2",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "MERGE INTO",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "metadata lookup",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('metadata lookup').output.value",
+                        "type": "Expression"
+                    },
+                    "activities": [
+                        {
+                            "name": "ACT_MI_SNW",
+                            "type": "Script",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "linkedServiceName": {
+                                "referenceName": "LS_SNOWFLAKE",
+                                "type": "LinkedServiceReference"
+                            },
+                            "typeProperties": {
+                                "scripts": [
+                                    {
+                                        "type": "Query",
+                                        "text": {
+                                            "value": "@concat(\n  'USE DATABASE ', json(item().TARGET).database, '; ',\n  'USE SCHEMA ',   json(item().TARGET).schema,   '; ',\n  'MERGE INTO ',\n    json(item().TARGET).database, '.', json(item().TARGET).schema, '.', json(item().TARGET).table, ' AS T\nUSING (\n  SELECT *\n  FROM (\n    SELECT\n      d.*,\n      ROW_NUMBER() OVER (\n        PARTITION BY d.MATRICULA\n        ORDER BY COALESCE(d.T_REC_UPD_TST, d.T_REC_INS_TST, TO_TIMESTAMP_NTZ(0)) DESC\n      ) AS rn\n    FROM ',\n      json(item().SOURCE).database, '.', json(item().SOURCE).schema, '.', json(item().SOURCE).table, ' d\n  )\n  WHERE rn = 1\n) AS S\nON T.', json(item().MERGE_KEYS).condition, ' = S.', json(item().MERGE_KEYS).condition, '\nWHEN MATCHED\n  AND COALESCE(T.', json(item().DEDUPE_ORDER).update, ', T.', json(item().DEDUPE_ORDER).insert, ', TO_TIMESTAMP_NTZ(0))\n      < COALESCE(S.', json(item().DEDUPE_ORDER).update, ', S.', json(item().DEDUPE_ORDER).insert, ', TO_TIMESTAMP_NTZ(0))\nTHEN UPDATE SET\n  T.DNI_PROPIETARIO   = S.DNI_PROPIETARIO,\n  T.MARCA_VEHICULO    = S.MARCA_VEHICULO,\n  T.PROVINCIA         = S.PROVINCIA,\n  T.FECHA_PROPIETARIO = S.FECHA_PROPIETARIO,\n  T.T_REC_INS_TST     = S.T_REC_INS_TST,\n  T.T_REC_UPD_TST     = S.T_REC_UPD_TST\nWHEN NOT MATCHED THEN\n  INSERT (MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, \n          FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST)\n  VALUES (S.MATRICULA, S.DNI_PROPIETARIO, S.MARCA_VEHICULO, S.PROVINCIA, \n          S.FECHA_PROPIETARIO, S.T_REC_INS_TST, S.T_REC_UPD_TST);'\n)\n",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                ],
+                                "scriptBlockExecutionTimeout": "02:00:00",
+                                "treatDecimalAsString": true
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "annotations": []
+    }
+}
