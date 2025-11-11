@@ -21,7 +21,6 @@ USING (
   FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.D_CARS
 ) S
 WHERE
-  -- Borra todo lo que NO sea la fila rn=1 (la "última" por matrícula)
   S.rn > 1
   AND T.matricula         = S.matricula
   AND T.dni_propietario   = S.dni_propietario
