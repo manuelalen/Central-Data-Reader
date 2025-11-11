@@ -1,15 +1,82 @@
 EXECUTE IMMEDIATE $$
 DECLARE
   IN_INGESTION_NAME STRING DEFAULT '__ING__';
-  v_block STRING;
+
+  v_s_db STRING; v_s_sc STRING; v_s_tb STRING;
+  v_t_db STRING; v_t_sc STRING; v_t_tb STRING;
+
+  v_cols_list   STRING;  -- "COL1","COL2",...
+  v_set_list    STRING;  -- T."COL1" = S."COL1", T."COL2" = S."COL2", ...
+  v_vals_list   STRING;  -- S."COL1", S."COL2", ...
+  v_sql         STRING;
 BEGIN
-  /* Construimos un único bloque BEGIN...END con todos los MERGE */
-  SELECT
-    'BEGIN ' || LISTAGG(stmt, ' ') || ' END;'
-  INTO :v_block
-  FROM (
+  FOR rec IN (
     SELECT
-      'MERGE INTO "'||(TARGET:database)::STRING||'"."'||(TARGET:schema)::STRING||'"."'||(TARGET:table)::STRING||'" AS T
+      SOURCE:database::STRING  AS S_DB,
+      SOURCE:schema::STRING    AS S_SC,
+      SOURCE:table::STRING     AS S_TB,
+      TARGET:database::STRING  AS T_DB,
+      TARGET:schema::STRING    AS T_SC,
+      TARGET:table::STRING     AS T_TB
+    FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
+    WHERE ACTIVE = TRUE
+      AND INGESTION_NAME = :IN_INGESTION_NAME
+    ORDER BY ID
+  ) DO
+    -- 1) Variables escalares para este par
+    v_s_db := rec.S_DB;  v_s_sc := rec.S_SC;  v_s_tb := rec.S_TB;
+    v_t_db := rec.T_DB;  v_t_sc := rec.T_SC;  v_t_tb := rec.T_TB;
+
+    -- 2) Columnas comunes entre SOURCE y TARGET (tomando el orden del TARGET)
+    SELECT LISTAGG('"'||c.COLUMN_NAME||'"', ',') WITHIN GROUP (ORDER BY c.ORDINAL_POSITION)
+      INTO :v_cols_list
+    FROM IDENTIFIER(v_t_db||'.INFORMATION_SCHEMA.COLUMNS') c
+    WHERE c.TABLE_SCHEMA = v_t_sc
+      AND c.TABLE_NAME   = v_t_tb
+      AND EXISTS (
+        SELECT 1
+        FROM IDENTIFIER(v_s_db||'.INFORMATION_SCHEMA.COLUMNS') s
+        WHERE s.TABLE_SCHEMA = v_s_sc
+          AND s.TABLE_NAME   = v_s_tb
+          AND s.COLUMN_NAME  = c.COLUMN_NAME
+      );
+
+    IF v_cols_list IS NULL THEN
+      -- Si no hay intersección, no hay nada que mergear
+      CONTINUE;
+    END IF;
+
+    -- 3) Lista para SET (T.col = S.col)
+    SELECT LISTAGG('T."'||c.COLUMN_NAME||'" = S."'||c.COLUMN_NAME||'"', ', ')
+      INTO :v_set_list
+    FROM IDENTIFIER(v_t_db||'.INFORMATION_SCHEMA.COLUMNS') c
+    WHERE c.TABLE_SCHEMA = v_t_sc
+      AND c.TABLE_NAME   = v_t_tb
+      AND EXISTS (
+        SELECT 1
+        FROM IDENTIFIER(v_s_db||'.INFORMATION_SCHEMA.COLUMNS') s
+        WHERE s.TABLE_SCHEMA = v_s_sc
+          AND s.TABLE_NAME   = v_s_tb
+          AND s.COLUMN_NAME  = c.COLUMN_NAME
+      );
+
+    -- 4) Lista de VALUES (S.col, S.col, ...)
+    SELECT LISTAGG('S."'||c.COLUMN_NAME||'"', ', ')
+      INTO :v_vals_list
+    FROM IDENTIFIER(v_t_db||'.INFORMATION_SCHEMA.COLUMNS') c
+    WHERE c.TABLE_SCHEMA = v_t_sc
+      AND c.TABLE_NAME   = v_t_tb
+      AND EXISTS (
+        SELECT 1
+        FROM IDENTIFIER(v_s_db||'.INFORMATION_SCHEMA.COLUMNS') s
+        WHERE s.TABLE_SCHEMA = v_s_sc
+          AND s.TABLE_NAME   = v_s_tb
+          AND s.COLUMN_NAME  = c.COLUMN_NAME
+      );
+
+    -- 5) MERGE con dedupe por matrícula en el USING
+    v_sql := '
+MERGE INTO "'||v_t_db||'"."'||v_t_sc||'"."'||v_t_tb||'" AS T
 USING (
   SELECT *
   FROM (
@@ -18,43 +85,21 @@ USING (
              PARTITION BY d.MATRICULA
              ORDER BY COALESCE(d.T_REC_UPD_TST, d.T_REC_INS_TST, TO_TIMESTAMP_NTZ(0)) DESC
            ) AS rn
-    FROM "'||(SOURCE:database)::STRING||'"."'||(SOURCE:schema)::STRING||'"."'||(SOURCE:table)::STRING||'" d
+    FROM "'||v_s_db||'"."'||v_s_sc||'"."'||v_s_tb||'" d
   )
   WHERE rn = 1
 ) AS S
-ON T.MATRICULA = S.MATRICULA
+ON T."MATRICULA" = S."MATRICULA"
 WHEN MATCHED
-  AND COALESCE(T.T_REC_UPD_TST, T.T_REC_INS_TST, TO_TIMESTAMP_NTZ(0))
-      < COALESCE(S.T_REC_UPD_TST, S.T_REC_INS_TST, TO_TIMESTAMP_NTZ(0))
+  AND COALESCE(T."T_REC_UPD_TST", T."T_REC_INS_TST", TO_TIMESTAMP_NTZ(0))
+      < COALESCE(S."T_REC_UPD_TST", S."T_REC_INS_TST", TO_TIMESTAMP_NTZ(0))
 THEN UPDATE SET
-  T.DNI_PROPIETARIO   = S.DNI_PROPIETARIO,
-  T.MARCA_VEHICULO    = S.MARCA_VEHICULO,
-  T.PROVINCIA         = S.PROVINCIA,
-  T.MUNICIPIO         = S.MUNICIPIO,
-  T.FECHA_PROPIETARIO = S.FECHA_PROPIETARIO,
-  T.T_REC_INS_TST     = S.T_REC_INS_TST,
-  T.T_REC_UPD_TST     = S.T_REC_UPD_TST
+  '||v_set_list||'
 WHEN NOT MATCHED THEN
-  INSERT (
-    MATRICULA, DNI_PROPIETARIO, MARCA_VEHICULO, PROVINCIA, MUNICIPIO,
-    FECHA_PROPIETARIO, T_REC_INS_TST, T_REC_UPD_TST
-  )
-  VALUES (
-    S.MATRICULA, S.DNI_PROPIETARIO, S.MARCA_VEHICULO, S.PROVINCIA, S.MUNICIPIO,
-    S.FECHA_PROPIETARIO, S.T_REC_INS_TST, S.T_REC_UPD_TST
-  );' AS stmt
-    FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
-    WHERE ACTIVE = TRUE
-      AND INGESTION_NAME = :IN_INGESTION_NAME
-    ORDER BY ID
-  );
+  INSERT ('||v_cols_list||')
+  VALUES ('||v_vals_list||');';
 
-  /* Ejecutamos el bloque sólo si hay sentencias */
-  IF (v_block IS NULL OR LENGTH(v_block) = 0) THEN
-    RETURN 'No hay tablas activas para la ingestión ' || IN_INGESTION_NAME;
-  END IF;
-
-  EXECUTE IMMEDIATE v_block;
-  RETURN 'MERGE ejecutado desde T_METADATA para ' || IN_INGESTION_NAME;
+    EXECUTE IMMEDIATE v_sql;
+  END FOR;
 END;
 $$;
