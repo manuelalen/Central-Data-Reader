@@ -45,13 +45,16 @@ WHEN NOT MATCHED THEN
   );' AS stmt
     FROM DEV_BRONCE_CARS_PROPERTIES.CP_STG.T_METADATA
     WHERE ACTIVE = TRUE
-      AND INGESTION_NAME = :IN_INGESTION_NAME   -- <<<<< AQUÍ EL ':'
+      AND INGESTION_NAME = :IN_INGESTION_NAME
     ORDER BY ID
   );
 
-  /* Ejecutamos el bloque con todos los MERGE */
-  IF v_block IS NOT NULL THEN
-    EXECUTE IMMEDIATE v_block;
+  /* Ejecutamos el bloque sólo si hay sentencias */
+  IF (v_block IS NULL OR LENGTH(v_block) = 0) THEN
+    RETURN 'No hay tablas activas para la ingestión ' || IN_INGESTION_NAME;
   END IF;
+
+  EXECUTE IMMEDIATE v_block;
+  RETURN 'MERGE ejecutado desde T_METADATA para ' || IN_INGESTION_NAME;
 END;
 $$;
